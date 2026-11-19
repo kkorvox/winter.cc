@@ -3,7 +3,7 @@
    It leaves the live result counter, generators and Owner Dashboard unchanged. */
 (() => {
   const $ = id => document.getElementById(id);
-  const APPROVED_WINDOWS_EXE = false; // change only after review of a newly built EXE
+  const APPROVED_WINDOWS_EXE = true; // change only after review of a newly built EXE
   const authTabs = ['login', 'create'];
 
   function showTab(mode) {
