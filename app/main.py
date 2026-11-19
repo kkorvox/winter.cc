@@ -1,6 +1,6 @@
 
 import json
-import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -104,7 +104,10 @@ def me(u=Depends(require)):
 
 
 @app.post("/api/logout")
-def logout(authorization: str | None = Header(None), u=Depends(require)):
+def logout(
+    authorization: str | None = Header(None),
+    u=Depends(require)
+):
     with db() as c:
         c.execute(
             "DELETE FROM sessions WHERE token_hash=?",
@@ -146,8 +149,12 @@ def generate(b: Generate, u=Depends(require)):
 
 @app.post("/api/check")
 def check(b: Check, u=Depends(require)):
+    if len(b.usernames) > 100000:
+        raise HTTPException(400, "Too many names")
     try:
-        sid, rows = start_search(u["id"], b.platform, b.usernames)
+        sid, rows = start_search(
+            u["id"], b.platform, b.usernames
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {
@@ -161,6 +168,7 @@ def check(b: Check, u=Depends(require)):
 def mark(b: Mark, u=Depends(require)):
     if b.status not in ("available", "claimed", "unknown"):
         raise HTTPException(400, "Invalid status")
+
     with db() as c:
         row = c.execute(
             """SELECT s.id, r.status FROM searches s
@@ -168,14 +176,21 @@ def mark(b: Mark, u=Depends(require)):
                WHERE s.id=? AND s.user_id=? AND r.username=?""",
             (b.search_id, u["id"], b.username)
         ).fetchone()
+
         if not row:
             raise HTTPException(404, "Result not found")
+
         if row["status"] == "skipped":
-            raise HTTPException(400, "Skipped results cannot be marked")
+            raise HTTPException(
+                400, "Skipped results cannot be marked"
+            )
+
         c.execute(
-            "UPDATE results SET status=? WHERE search_id=? AND username=?",
+            "UPDATE results SET status=? "
+            "WHERE search_id=? AND username=?",
             (b.status, b.search_id, b.username)
         )
+
     return {"ok": True, "verification": "user-reported"}
 
 
@@ -189,6 +204,7 @@ def history(u=Depends(require)):
                 (u["id"],)
             )
         ]
+
         for s in searches:
             s["results"] = [
                 dict(r) for r in c.execute(
@@ -197,6 +213,7 @@ def history(u=Depends(require)):
                     (s["id"],)
                 )
             ]
+
     return searches
 
 
@@ -223,11 +240,15 @@ def add_favorite(b: Favorite, u=Depends(require)):
 
 
 @app.delete("/api/favorites/{platform}/{username}")
-def del_favorite(platform: str, username: str, u=Depends(require)):
+def del_favorite(
+    platform: str,
+    username: str,
+    u=Depends(require)
+):
     with db() as c:
         c.execute(
-            "DELETE FROM favorites WHERE user_id=? "
-            "AND platform=? AND username=?",
+            "DELETE FROM favorites "
+            "WHERE user_id=? AND platform=? AND username=?",
             (u["id"], platform, username)
         )
     return {"ok": True}
@@ -237,7 +258,10 @@ def del_favorite(platform: str, username: str, u=Depends(require)):
 def presets(u=Depends(require)):
     with db() as c:
         return [
-            {"name": r["name"], "config": json.loads(r["config"])}
+            {
+                "name": r["name"],
+                "config": json.loads(r["config"])
+            }
             for r in c.execute(
                 "SELECT name,config FROM presets WHERE user_id=?",
                 (u["id"],)
@@ -249,6 +273,7 @@ def presets(u=Depends(require)):
 def save_preset(b: Preset, u=Depends(require)):
     if not 1 <= len(b.name) <= 50:
         raise HTTPException(400, "Invalid preset name")
+
     with db() as c:
         c.execute(
             """INSERT INTO presets VALUES(?,?,?)
@@ -256,30 +281,120 @@ def save_preset(b: Preset, u=Depends(require)):
                DO UPDATE SET config=excluded.config""",
             (u["id"], b.name, json.dumps(b.config))
         )
+
     return {"ok": True}
 
 
-# OWNER DASHBOARD API
+# OWNER DASHBOARD V2
 
 @app.get("/api/admin/users")
 def admin_users(u=Depends(require_admin)):
     with db() as c:
         return [
             dict(r) for r in c.execute(
-                "SELECT id,username,is_admin FROM users ORDER BY id"
+                "SELECT id,username,is_admin "
+                "FROM users ORDER BY id"
             )
         ]
 
 
 @app.post("/api/admin/users")
-def admin_create_user(b: AdminUser, u=Depends(require_admin)):
+def admin_create_user(
+    b: AdminUser,
+    u=Depends(require_admin)
+):
+    username = b.username.strip()
+
+    if not username:
+        raise HTTPException(400, "Username is required")
+
     try:
-        user_id = create_user(b.username, b.password)
+        with db() as c:
+            existing = c.execute(
+                "SELECT id FROM users "
+                "WHERE username=? COLLATE NOCASE",
+                (username,)
+            ).fetchone()
+
+            if existing:
+                raise HTTPException(
+                    409, "Username already exists!"
+                )
+
+        user_id = create_user(username, b.password)
+
+    except HTTPException:
+        raise
+    except sqlite3.IntegrityError:
+        raise HTTPException(
+            409, "Username already exists!"
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except Exception:
-        raise HTTPException(409, "Username may already exist")
-    return {"id": user_id, "username": b.username}
+
+    return {
+        "id": user_id,
+        "username": username,
+        "message": "Member successfully created!"
+    }
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(
+    user_id: int,
+    u=Depends(require_admin)
+):
+    if user_id == u["id"]:
+        raise HTTPException(
+            403, "You cannot delete your own owner account"
+        )
+
+    with db() as c:
+        user = c.execute(
+            "SELECT id,username,is_admin FROM users WHERE id=?",
+            (user_id,)
+        ).fetchone()
+
+        if not user:
+            raise HTTPException(404, "User not found")
+
+        if user["is_admin"]:
+            raise HTTPException(
+                403, "Owner accounts cannot be deleted"
+            )
+
+        username = user["username"]
+
+        # Remove the member's search results.
+        c.execute(
+            "DELETE FROM results WHERE search_id IN "
+            "(SELECT id FROM searches WHERE user_id=?)",
+            (user_id,)
+        )
+
+        # Remove all member-owned records.
+        for table in (
+            "searches",
+            "favorites",
+            "presets",
+            "check_state",
+            "sessions",
+            "licenses"
+        ):
+            c.execute(
+                f"DELETE FROM {table} WHERE user_id=?",
+                (user_id,)
+            )
+
+        c.execute(
+            "DELETE FROM users WHERE id=?",
+            (user_id,)
+        )
+
+    return {
+        "ok": True,
+        "message": f"Member {username} successfully deleted!"
+    }
 
 
 @app.get("/api/admin/licenses")
@@ -292,6 +407,7 @@ def admin_licenses(u=Depends(require_admin)):
                JOIN users ON users.id=l.user_id
                ORDER BY l.id DESC"""
         ).fetchall()
+
         return [dict(r) for r in rows]
 
 
@@ -305,38 +421,49 @@ def admin_create_license(
 
     if expires:
         try:
-            dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(
+                expires.replace("Z", "+00:00")
+            )
             if dt.tzinfo is None:
                 raise ValueError()
             if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
                 raise ValueError()
             expires = dt.astimezone(timezone.utc).isoformat()
         except ValueError:
-            raise HTTPException(400, "Enter a valid future expiration date")
+            raise HTTPException(
+                400, "Enter a valid future expiration date"
+            )
 
     with db() as c:
         user = c.execute(
-            "SELECT id FROM users WHERE id=?", (user_id,)
+            "SELECT id FROM users WHERE id=?",
+            (user_id,)
         ).fetchone()
+
         if not user:
             raise HTTPException(404, "User not found")
 
     key = create_license(user_id, expires)
+
     return {
         "license_key": key,
         "user_id": user_id,
         "expires_at": expires,
-        "message": "Save this key now. It cannot be viewed again."
+        "message": "License successfully generated!"
     }
 
 
 @app.post("/api/admin/licenses/{license_id}/revoke")
-def admin_revoke_license(license_id: int, u=Depends(require_admin)):
+def admin_revoke_license(
+    license_id: int,
+    u=Depends(require_admin)
+):
     with db() as c:
         row = c.execute(
             "SELECT user_id,revoked FROM licenses WHERE id=?",
             (license_id,)
         ).fetchone()
+
         if not row:
             raise HTTPException(404, "License not found")
 
@@ -348,35 +475,52 @@ def admin_revoke_license(license_id: int, u=Depends(require_admin)):
                    AND (expires_at IS NULL OR expires_at>?)""",
                 (u["id"], license_id, now())
             ).fetchone()[0]
+
             if not other:
                 raise HTTPException(
-                    400, "Cannot revoke your last active owner license"
+                    400,
+                    "Cannot revoke your last active owner license"
                 )
 
         c.execute(
             "UPDATE licenses SET revoked=1 WHERE id=?",
             (license_id,)
         )
+
         c.execute(
             "DELETE FROM sessions WHERE user_id=?",
             (row["user_id"],)
         )
-    return {"ok": True}
+
+    return {
+        "ok": True,
+        "message": "License successfully revoked!"
+    }
 
 
 @app.post("/api/admin/licenses/{license_id}/reactivate")
-def admin_reactivate_license(license_id: int, u=Depends(require_admin)):
+def admin_reactivate_license(
+    license_id: int,
+    u=Depends(require_admin)
+):
     with db() as c:
         row = c.execute(
-            "SELECT id FROM licenses WHERE id=?", (license_id,)
+            "SELECT id FROM licenses WHERE id=?",
+            (license_id,)
         ).fetchone()
+
         if not row:
             raise HTTPException(404, "License not found")
+
         c.execute(
             "UPDATE licenses SET revoked=0 WHERE id=?",
             (license_id,)
         )
-    return {"ok": True}
+
+    return {
+        "ok": True,
+        "message": "License successfully reactivated!"
+    }
 
 
 @app.get("/api/health")
