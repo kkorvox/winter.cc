@@ -1,4 +1,57 @@
 
+def init():
+    with db() as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password BLOB NOT NULL,
+            is_admin INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS licenses (
+            id INTEGER PRIMARY KEY,
+            key_hash TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            revoked INTEGER DEFAULT 0,
+            expires_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS searches (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            platform TEXT,
+            created TEXT
+        );
+        CREATE TABLE IF NOT EXISTS results (
+            search_id INTEGER,
+            username TEXT,
+            status TEXT,
+            PRIMARY KEY(search_id, username)
+        );
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id INTEGER,
+            platform TEXT,
+            username TEXT,
+            PRIMARY KEY(user_id, platform, username)
+        );
+        CREATE TABLE IF NOT EXISTS presets (
+            user_id INTEGER,
+            name TEXT,
+            config TEXT,
+            PRIMARY KEY(user_id, name)
+        );
+        CREATE TABLE IF NOT EXISTS check_state (
+            user_id INTEGER,
+            platform TEXT,
+            previous_search INTEGER,
+            PRIMARY KEY(user_id, platform)
+        );
+        """)
+
 def setup_owner():
     """Create the owner account and license from Render settings."""
     username = os.getenv("WINTER_OWNER_USERNAME", "").strip()
@@ -52,5 +105,4 @@ def setup_owner():
                 (key_hash, user_id)
             )
 
-def setup_owner():
-    return None
+
