@@ -1,6 +1,5 @@
 
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from psycopg.errors import UniqueViolation
 
 from .core import (
     init, setup_owner, db, auth, current_user,
@@ -38,7 +38,9 @@ class Generate(BaseModel):
     platform: str = "Discord"
     lengths: list[int] = Field(default_factory=lambda: [3, 4, 5])
     types: list[str] = Field(default_factory=lambda: ["Random letters"])
-    characters: list[str] = Field(default_factory=lambda: ["Lowercase", "Numbers"])
+    characters: list[str] = Field(
+        default_factory=lambda: ["Lowercase", "Numbers"]
+    )
     prefix: str = ""
     suffix: str = ""
     amount: int = Field(default=100, ge=1, le=100000)
@@ -78,103 +80,136 @@ class AdminLicense(BaseModel):
 def require(authorization: str | None = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Login required")
-    u = current_user(authorization[7:])
-    if not u:
-        raise HTTPException(401, "Session expired or license revoked")
-    return u
+
+    user = current_user(authorization[7:])
+
+    if not user:
+        raise HTTPException(
+            401, "Session expired or license revoked"
+        )
+
+    return user
 
 
-def require_admin(u=Depends(require)):
-    if not u["is_admin"]:
+def require_admin(user=Depends(require)):
+    if not user["is_admin"]:
         raise HTTPException(403, "Owner access required")
-    return u
+    return user
 
 
 @app.post("/api/login")
 def login(body: Login):
-    token = auth(body.username, body.password, body.license_key)
+    token = auth(
+        body.username,
+        body.password,
+        body.license_key
+    )
+
     if not token:
-        raise HTTPException(401, "Invalid credentials or license")
+        raise HTTPException(
+            401, "Invalid credentials or license"
+        )
+
     return {"token": token}
 
 
 @app.get("/api/me")
-def me(u=Depends(require)):
-    return u
+def me(user=Depends(require)):
+    return user
 
 
 @app.post("/api/logout")
 def logout(
     authorization: str | None = Header(None),
-    u=Depends(require)
+    user=Depends(require)
 ):
-    with db() as c:
-        c.execute(
-            "DELETE FROM sessions WHERE token_hash=?",
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM sessions WHERE token_hash=%s",
             (hash_key(authorization[7:]),)
         )
+
     return {"ok": True}
 
 
 @app.get("/api/platforms")
-def platforms(u=Depends(require)):
+def platforms(user=Depends(require)):
     return {
-        k: {
-            "min": v[0],
-            "max": v[1],
-            "characters": "".join(sorted(v[2])),
+        name: {
+            "min": rule[0],
+            "max": rule[1],
+            "characters": "".join(sorted(rule[2])),
             "checking": "manual"
         }
-        for k, v in RULES.items()
+        for name, rule in RULES.items()
     }
 
 
 @app.post("/api/generate")
-def generate(b: Generate, u=Depends(require)):
+def generate(body: Generate, user=Depends(require)):
     try:
         names = candidates(
-            b.platform, b.lengths, b.types,
-            b.characters, b.prefix, b.suffix,
-            b.amount, b.wordlist
+            body.platform,
+            body.lengths,
+            body.types,
+            body.characters,
+            body.prefix,
+            body.suffix,
+            body.amount,
+            body.wordlist
         )
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+
     return {
         "usernames": names,
-        "requested": b.amount,
+        "requested": body.amount,
         "generated": len(names),
-        "platform": b.platform
+        "platform": body.platform
     }
 
 
 @app.post("/api/check")
-def check(b: Check, u=Depends(require)):
-    if len(b.usernames) > 100000:
+def check(body: Check, user=Depends(require)):
+    if len(body.usernames) > 100000:
         raise HTTPException(400, "Too many names")
+
     try:
-        sid, rows = start_search(
-            u["id"], b.platform, b.usernames
+        search_id, rows = start_search(
+            user["id"],
+            body.platform,
+            body.usernames
         )
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+
     return {
-        "search_id": sid,
+        "search_id": search_id,
         "results": rows,
         "message": "Manual verification required."
     }
 
 
 @app.post("/api/mark")
-def mark(b: Mark, u=Depends(require)):
-    if b.status not in ("available", "claimed", "unknown"):
+def mark(body: Mark, user=Depends(require)):
+    if body.status not in (
+        "available", "claimed", "unknown"
+    ):
         raise HTTPException(400, "Invalid status")
 
-    with db() as c:
-        row = c.execute(
-            """SELECT s.id, r.status FROM searches s
+    with db() as conn:
+        row = conn.execute(
+            """SELECT s.id, r.status
+               FROM searches s
                JOIN results r ON r.search_id=s.id
-               WHERE s.id=? AND s.user_id=? AND r.username=?""",
-            (b.search_id, u["id"], b.username)
+               WHERE s.id=%s
+               AND s.user_id=%s
+               AND r.username=%s""",
+            (
+                body.search_id,
+                user["id"],
+                body.username
+            )
         ).fetchone()
 
         if not row:
@@ -185,32 +220,48 @@ def mark(b: Mark, u=Depends(require)):
                 400, "Skipped results cannot be marked"
             )
 
-        c.execute(
-            "UPDATE results SET status=? "
-            "WHERE search_id=? AND username=?",
-            (b.status, b.search_id, b.username)
+        conn.execute(
+            """UPDATE results
+               SET status=%s
+               WHERE search_id=%s
+               AND username=%s""",
+            (
+                body.status,
+                body.search_id,
+                body.username
+            )
         )
 
-    return {"ok": True, "verification": "user-reported"}
+    return {
+        "ok": True,
+        "verification": "user-reported"
+    }
 
 
 @app.get("/api/history")
-def history(u=Depends(require)):
-    with db() as c:
+def history(user=Depends(require)):
+    with db() as conn:
         searches = [
-            dict(r) for r in c.execute(
-                "SELECT id,platform,created FROM searches "
-                "WHERE user_id=? ORDER BY id DESC LIMIT 50",
-                (u["id"],)
+            dict(row)
+            for row in conn.execute(
+                """SELECT id,platform,created
+                   FROM searches
+                   WHERE user_id=%s
+                   ORDER BY id DESC
+                   LIMIT 50""",
+                (user["id"],)
             )
         ]
 
-        for s in searches:
-            s["results"] = [
-                dict(r) for r in c.execute(
-                    "SELECT username,status FROM results "
-                    "WHERE search_id=? LIMIT 200",
-                    (s["id"],)
+        for search in searches:
+            search["results"] = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT username,status
+                       FROM results
+                       WHERE search_id=%s
+                       LIMIT 200""",
+                    (search["id"],)
                 )
             ]
 
@@ -218,68 +269,92 @@ def history(u=Depends(require)):
 
 
 @app.get("/api/favorites")
-def favorites(u=Depends(require)):
-    with db() as c:
+def favorites(user=Depends(require)):
+    with db() as conn:
         return [
-            dict(r) for r in c.execute(
-                "SELECT platform,username FROM favorites "
-                "WHERE user_id=? ORDER BY username",
-                (u["id"],)
+            dict(row)
+            for row in conn.execute(
+                """SELECT platform,username
+                   FROM favorites
+                   WHERE user_id=%s
+                   ORDER BY username""",
+                (user["id"],)
             )
         ]
 
 
 @app.post("/api/favorites")
-def add_favorite(b: Favorite, u=Depends(require)):
-    with db() as c:
-        c.execute(
-            "INSERT OR IGNORE INTO favorites VALUES(?,?,?)",
-            (u["id"], b.platform, b.username)
+def add_favorite(body: Favorite, user=Depends(require)):
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO favorites
+               (user_id,platform,username)
+               VALUES(%s,%s,%s)
+               ON CONFLICT(user_id,platform,username)
+               DO NOTHING""",
+            (
+                user["id"],
+                body.platform,
+                body.username
+            )
         )
+
     return {"ok": True}
 
 
 @app.delete("/api/favorites/{platform}/{username}")
-def del_favorite(
+def delete_favorite(
     platform: str,
     username: str,
-    u=Depends(require)
+    user=Depends(require)
 ):
-    with db() as c:
-        c.execute(
-            "DELETE FROM favorites "
-            "WHERE user_id=? AND platform=? AND username=?",
-            (u["id"], platform, username)
+    with db() as conn:
+        conn.execute(
+            """DELETE FROM favorites
+               WHERE user_id=%s
+               AND platform=%s
+               AND username=%s""",
+            (user["id"], platform, username)
         )
+
     return {"ok": True}
 
 
 @app.get("/api/presets")
-def presets(u=Depends(require)):
-    with db() as c:
+def presets(user=Depends(require)):
+    with db() as conn:
         return [
             {
-                "name": r["name"],
-                "config": json.loads(r["config"])
+                "name": row["name"],
+                "config": json.loads(row["config"])
             }
-            for r in c.execute(
-                "SELECT name,config FROM presets WHERE user_id=?",
-                (u["id"],)
+            for row in conn.execute(
+                """SELECT name,config
+                   FROM presets
+                   WHERE user_id=%s""",
+                (user["id"],)
             )
         ]
 
 
 @app.post("/api/presets")
-def save_preset(b: Preset, u=Depends(require)):
-    if not 1 <= len(b.name) <= 50:
+def save_preset(body: Preset, user=Depends(require)):
+    if not 1 <= len(body.name) <= 50:
         raise HTTPException(400, "Invalid preset name")
 
-    with db() as c:
-        c.execute(
-            """INSERT INTO presets VALUES(?,?,?)
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO presets
+               (user_id,name,config)
+               VALUES(%s,%s,%s)
                ON CONFLICT(user_id,name)
-               DO UPDATE SET config=excluded.config""",
-            (u["id"], b.name, json.dumps(b.config))
+               DO UPDATE SET
+               config=excluded.config""",
+            (
+                user["id"],
+                body.name,
+                json.dumps(body.config)
+            )
         )
 
     return {"ok": True}
@@ -287,50 +362,47 @@ def save_preset(b: Preset, u=Depends(require)):
 
 # OWNER DASHBOARD V2
 
+
 @app.get("/api/admin/users")
-def admin_users(u=Depends(require_admin)):
-    with db() as c:
+def admin_users(user=Depends(require_admin)):
+    with db() as conn:
         return [
-            dict(r) for r in c.execute(
-                "SELECT id,username,is_admin "
-                "FROM users ORDER BY id"
+            dict(row)
+            for row in conn.execute(
+                """SELECT id,username,is_admin
+                   FROM users
+                   ORDER BY id"""
             )
         ]
 
 
 @app.post("/api/admin/users")
 def admin_create_user(
-    b: AdminUser,
-    u=Depends(require_admin)
+    body: AdminUser,
+    user=Depends(require_admin)
 ):
-    username = b.username.strip()
+    username = body.username.strip()
 
     if not username:
-        raise HTTPException(400, "Username is required")
+        raise HTTPException(
+            400, "Username is required"
+        )
 
     try:
-        with db() as c:
-            existing = c.execute(
-                "SELECT id FROM users "
-                "WHERE username=? COLLATE NOCASE",
-                (username,)
-            ).fetchone()
+        user_id = create_user(
+            username,
+            body.password
+        )
 
-            if existing:
-                raise HTTPException(
-                    409, "Username already exists!"
-                )
-
-        user_id = create_user(username, b.password)
-
-    except HTTPException:
-        raise
-    except sqlite3.IntegrityError:
+    except UniqueViolation:
         raise HTTPException(
             409, "Username already exists!"
         )
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+
+    except ValueError as error:
+        raise HTTPException(
+            400, str(error)
+        )
 
     return {
         "id": user_id,
@@ -342,108 +414,122 @@ def admin_create_user(
 @app.delete("/api/admin/users/{user_id}")
 def admin_delete_user(
     user_id: int,
-    u=Depends(require_admin)
+    user=Depends(require_admin)
 ):
-    if user_id == u["id"]:
+    if user_id == user["id"]:
         raise HTTPException(
-            403, "You cannot delete your own owner account"
+            403,
+            "You cannot delete your own owner account"
         )
 
-    with db() as c:
-        user = c.execute(
-            "SELECT id,username,is_admin FROM users WHERE id=?",
+    with db() as conn:
+        target = conn.execute(
+            """SELECT id,username,is_admin
+               FROM users
+               WHERE id=%s
+               FOR UPDATE""",
             (user_id,)
         ).fetchone()
 
-        if not user:
-            raise HTTPException(404, "User not found")
+        if not target:
+            raise HTTPException(
+                404, "User not found"
+            )
 
-        if user["is_admin"]:
+        if target["is_admin"]:
             raise HTTPException(
                 403, "Owner accounts cannot be deleted"
             )
 
-        username = user["username"]
+        username = target["username"]
 
-        # Remove the member's search results.
-        c.execute(
-            "DELETE FROM results WHERE search_id IN "
-            "(SELECT id FROM searches WHERE user_id=?)",
-            (user_id,)
-        )
-
-        # Remove all member-owned records.
-        for table in (
-            "searches",
-            "favorites",
-            "presets",
-            "check_state",
-            "sessions",
-            "licenses"
-        ):
-            c.execute(
-                f"DELETE FROM {table} WHERE user_id=?",
-                (user_id,)
-            )
-
-        c.execute(
-            "DELETE FROM users WHERE id=?",
+        # Foreign-key cascades remove the user's
+        # licenses, sessions, searches, results,
+        # favorites, presets and check state.
+        conn.execute(
+            "DELETE FROM users WHERE id=%s",
             (user_id,)
         )
 
     return {
         "ok": True,
-        "message": f"Member {username} successfully deleted!"
+        "message": (
+            f"Member {username} successfully deleted!"
+        )
     }
 
 
 @app.get("/api/admin/licenses")
-def admin_licenses(u=Depends(require_admin)):
-    with db() as c:
-        rows = c.execute(
-            """SELECT l.id,l.user_id,users.username,
-                      l.revoked,l.expires_at
-               FROM licenses l
-               JOIN users ON users.id=l.user_id
-               ORDER BY l.id DESC"""
-        ).fetchall()
-
-        return [dict(r) for r in rows]
+def admin_licenses(user=Depends(require_admin)):
+    with db() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """SELECT l.id,
+                          l.user_id,
+                          u.username,
+                          l.revoked,
+                          l.expires_at
+                   FROM licenses l
+                   JOIN users u ON u.id=l.user_id
+                   ORDER BY l.id DESC"""
+            )
+        ]
 
 
 @app.post("/api/admin/users/{user_id}/licenses")
 def admin_create_license(
     user_id: int,
-    b: AdminLicense,
-    u=Depends(require_admin)
+    body: AdminLicense,
+    user=Depends(require_admin)
 ):
-    expires = b.expires_at
+    expires = body.expires_at
 
     if expires:
         try:
             dt = datetime.fromisoformat(
                 expires.replace("Z", "+00:00")
             )
+
             if dt.tzinfo is None:
                 raise ValueError()
-            if dt.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+
+            if dt.astimezone(timezone.utc) <= datetime.now(
+                timezone.utc
+            ):
                 raise ValueError()
-            expires = dt.astimezone(timezone.utc).isoformat()
+
+            expires = dt.astimezone(
+                timezone.utc
+            ).isoformat()
+
         except ValueError:
             raise HTTPException(
-                400, "Enter a valid future expiration date"
+                400,
+                "Enter a valid future expiration date"
             )
 
-    with db() as c:
-        user = c.execute(
-            "SELECT id FROM users WHERE id=?",
+    with db() as conn:
+        target = conn.execute(
+            "SELECT id FROM users WHERE id=%s",
             (user_id,)
         ).fetchone()
 
-        if not user:
-            raise HTTPException(404, "User not found")
+        if not target:
+            raise HTTPException(
+                404, "User not found"
+            )
 
-    key = create_license(user_id, expires)
+    try:
+        key = create_license(
+            user_id,
+            expires
+        )
+    except Exception:
+        # Do not expose database details to members.
+        raise HTTPException(
+            500, "Unable to generate license"
+        )
 
     return {
         "license_key": key,
@@ -456,25 +542,42 @@ def admin_create_license(
 @app.post("/api/admin/licenses/{license_id}/revoke")
 def admin_revoke_license(
     license_id: int,
-    u=Depends(require_admin)
+    user=Depends(require_admin)
 ):
-    with db() as c:
-        row = c.execute(
-            "SELECT user_id,revoked FROM licenses WHERE id=?",
+    with db() as conn:
+        row = conn.execute(
+            """SELECT user_id,revoked
+               FROM licenses
+               WHERE id=%s
+               FOR UPDATE""",
             (license_id,)
         ).fetchone()
 
         if not row:
-            raise HTTPException(404, "License not found")
+            raise HTTPException(
+                404, "License not found"
+            )
 
-        if row["user_id"] == u["id"] and not row["revoked"]:
-            other = c.execute(
-                """SELECT COUNT(*) FROM licenses
-                   WHERE user_id=? AND id!=?
+        if (
+            row["user_id"] == user["id"]
+            and not row["revoked"]
+        ):
+            other = conn.execute(
+                """SELECT COUNT(*) AS total
+                   FROM licenses
+                   WHERE user_id=%s
+                   AND id!=%s
                    AND revoked=0
-                   AND (expires_at IS NULL OR expires_at>?)""",
-                (u["id"], license_id, now())
-            ).fetchone()[0]
+                   AND (
+                       expires_at IS NULL
+                       OR expires_at>%s
+                   )""",
+                (
+                    user["id"],
+                    license_id,
+                    now()
+                )
+            ).fetchone()["total"]
 
             if not other:
                 raise HTTPException(
@@ -482,13 +585,16 @@ def admin_revoke_license(
                     "Cannot revoke your last active owner license"
                 )
 
-        c.execute(
-            "UPDATE licenses SET revoked=1 WHERE id=?",
+        conn.execute(
+            """UPDATE licenses
+               SET revoked=1
+               WHERE id=%s""",
             (license_id,)
         )
 
-        c.execute(
-            "DELETE FROM sessions WHERE user_id=?",
+        conn.execute(
+            """DELETE FROM sessions
+               WHERE user_id=%s""",
             (row["user_id"],)
         )
 
@@ -501,19 +607,25 @@ def admin_revoke_license(
 @app.post("/api/admin/licenses/{license_id}/reactivate")
 def admin_reactivate_license(
     license_id: int,
-    u=Depends(require_admin)
+    user=Depends(require_admin)
 ):
-    with db() as c:
-        row = c.execute(
-            "SELECT id FROM licenses WHERE id=?",
+    with db() as conn:
+        row = conn.execute(
+            """SELECT id
+               FROM licenses
+               WHERE id=%s""",
             (license_id,)
         ).fetchone()
 
         if not row:
-            raise HTTPException(404, "License not found")
+            raise HTTPException(
+                404, "License not found"
+            )
 
-        c.execute(
-            "UPDATE licenses SET revoked=0 WHERE id=?",
+        conn.execute(
+            """UPDATE licenses
+               SET revoked=0
+               WHERE id=%s""",
             (license_id,)
         )
 
@@ -530,7 +642,9 @@ def health():
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "frontend" / "index.html")
+    return FileResponse(
+        ROOT / "frontend" / "index.html"
+    )
 
 
 app.mount(
