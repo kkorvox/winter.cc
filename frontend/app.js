@@ -1,10 +1,16 @@
 
+/* winter.cc Frontend V6.5
+   Full replacement
+   Includes Pomelo diagnostics and paced Discord checks.
+*/
+
 const $ = id => document.getElementById(id);
 
 let token = sessionStorage.getItem('winter_token') || '';
 let names = [];
 let statuses = {};
 let sources = {};
+let checkReasons = {};
 let searchId = null;
 let wordlist = null;
 let platforms = {};
@@ -33,7 +39,9 @@ const chars = [
   'Periods'
 ];
 
-const BATCH_SIZE = 25;
+const DEFAULT_BATCH_SIZE = 25;
+const DISCORD_BATCH_SIZE = 1;
+const DISCORD_DELAY_MS = 5500;
 
 async function api(path, body, method = 'POST') {
   const response = await fetch('/api/' + path, {
@@ -66,7 +74,7 @@ async function api(path, body, method = 'POST') {
     throw Error(
       typeof data.detail === 'string'
         ? data.detail
-        : 'Request failed'
+        : 'Request failed (' + response.status + ')'
     );
   }
 
@@ -184,6 +192,7 @@ function download(ext, content, mime) {
   );
 
   const a = document.createElement('a');
+
   a.href = url;
   a.download =
     'wintercc-' +
@@ -229,25 +238,69 @@ function statusLabel(status) {
   }[status] || 'Not checked';
 }
 
-function installStyles() {
-  if (document.getElementById('winter-v6-style')) {
-    return;
+function friendlyReason(reason) {
+  const reasons = {
+    pomelo_cooldown:
+      'Pomelo cooldown: request was not sent',
+    pomelo_rate_limited:
+      'Pomelo rate limit reached',
+    pomelo_network_error:
+      'Could not connect to Pomelo',
+    pomelo_access_denied:
+      'Pomelo denied API access',
+    pomelo_invalid_response:
+      'Pomelo returned an invalid response',
+    pomelo_missing_data:
+      'Pomelo response was missing status data',
+    pomelo_batch_limit:
+      'Not checked: backend batch limit',
+    not_checked:
+      'Not checked by provider',
+    already_recorded:
+      'Previously saved result',
+    discord_format_valid_availability_unverified:
+      'Format valid; availability not verified',
+    format_valid_but_availability_unverified:
+      'Format valid; availability not verified',
+    no_existing_profile:
+      'No existing profile found; availability unconfirmed',
+    discord_invalid_length:
+      'Invalid Discord username length',
+    discord_invalid_characters:
+      'Invalid Discord username characters',
+    discord_consecutive_periods:
+      'Consecutive periods are not allowed',
+    third_party_report_unverified:
+      'Third-party report; not independently confirmed'
+  };
+
+  if (!reason) return '';
+
+  if (reason.startsWith('pomelo_reported_')) {
+    return 'Pomelo reports: ' +
+      reason.slice('pomelo_reported_'.length);
   }
 
+  return reasons[reason] ||
+    reason.replaceAll('_', ' ');
+}
+
+function installStyles() {
+  if ($('winter-v65-style')) return;
+
   const style = document.createElement('style');
-  style.id = 'winter-v6-style';
+  style.id = 'winter-v65-style';
 
   style.textContent = `
-    @keyframes winterV6Rainbow {
+    @keyframes winterRainbow {
       from { background-position: 0% 50%; }
       to { background-position: 200% 50%; }
     }
 
-    @keyframes winterV6Glow {
+    @keyframes winterGlow {
       0%, 100% {
         filter: drop-shadow(0 0 3px #ff3b8d);
       }
-
       50% {
         filter: drop-shadow(0 0 6px #00dfff);
       }
@@ -273,12 +326,12 @@ function installStyles() {
       -webkit-text-fill-color: transparent;
       font-weight: 900;
       animation:
-        winterV6Rainbow 2.4s linear infinite,
-        winterV6Glow 3s ease-in-out infinite;
+        winterRainbow 2.4s linear infinite,
+        winterGlow 3s ease-in-out infinite;
     }
 
     #resultList .winter-available-row {
-      border-color: rgba(177, 90, 255, .32) !important;
+      border-color: rgba(177,90,255,.32) !important;
     }
 
     #resultList .winter-available-row .status {
@@ -286,10 +339,20 @@ function installStyles() {
       font-weight: 700;
     }
 
+    #resultList .winter-reason {
+      display: block;
+      flex-basis: 100%;
+      width: 100%;
+      font-size: 11px;
+      opacity: .8;
+      overflow-wrap: anywhere;
+      margin-top: 4px;
+    }
+
     #winter-v6-progress {
       margin: 12px 0;
       padding: 12px;
-      border: 1px solid rgba(160, 110, 255, .3);
+      border: 1px solid rgba(160,110,255,.3);
       border-radius: 12px;
     }
 
@@ -302,7 +365,7 @@ function installStyles() {
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: rgba(150, 150, 180, .2);
+      background: rgba(150,150,180,.2);
       margin-top: 9px;
     }
 
@@ -394,7 +457,6 @@ function render() {
         option.value = x;
         option.textContent =
           statusLabel(x) + ' (manual)';
-
         select.append(option);
       }
 
@@ -417,6 +479,8 @@ function render() {
 
           statuses[n] = select.value;
           sources[n] = 'manual';
+          checkReasons[n] =
+            'Manually marked by user';
           render();
         } catch (e) {
           notice(e.message);
@@ -432,6 +496,22 @@ function render() {
       tag.className = 'muted';
       tag.textContent = 'User-reported';
       row.append(tag);
+    }
+
+    if (checkReasons[n]) {
+      const detail = document.createElement('small');
+      detail.className = 'winter-reason muted';
+
+      detail.textContent =
+        friendlyReason(checkReasons[n]) +
+        (
+          sources[n] === 'automatic'
+            ? ' · Automatic check'
+            : ''
+        );
+
+      detail.title = checkReasons[n];
+      row.append(detail);
     }
 
     list.append(row);
@@ -559,8 +639,10 @@ async function loadPresets() {
       names = [];
       statuses = {};
       sources = {};
+      checkReasons = {};
       searchId = null;
       checkRun = null;
+      saveCheckRun();
 
       render();
       notice('Preset loaded');
@@ -570,7 +652,10 @@ async function loadPresets() {
   }
 }
 
+
+// =====================================
 // OWNER DASHBOARD V3
+// =====================================
 
 function formatDate(value) {
   if (!value) return 'Never';
@@ -636,7 +721,6 @@ function licenseRow(license) {
     formatDate(license.expires_at);
 
   const status = licenseStatus(license);
-
   const badge = document.createElement('strong');
 
   badge.className =
@@ -648,7 +732,6 @@ function licenseRow(license) {
         : 'status-expired');
 
   badge.textContent = status;
-
   row.append(info, badge);
 
   if (!license.revoked) {
@@ -787,8 +870,9 @@ function renderAdminUsers() {
             ? 'tiny success-button'
             : 'tiny danger-button',
           async () => {
-            const suspend =
-              !Boolean(user.suspended);
+            const suspend = !Boolean(
+              user.suspended
+            );
 
             if (!confirm(
               (suspend
@@ -980,7 +1064,7 @@ async function loadAdminStats() {
     ['adminRevoked', 'revoked_licenses']
   ]) {
     $(id).textContent =
-      Number(s[key]).toLocaleString();
+      Number(s[key] || 0).toLocaleString();
   }
 }
 
@@ -1089,8 +1173,12 @@ async function loadAdmin() {
   }
 }
 
-$('adminUserSearch').oninput =
-  renderAdminUsers;
+
+// =====================================
+// OWNER DASHBOARD EVENTS
+// =====================================
+
+$('adminUserSearch').oninput = renderAdminUsers;
 
 $('adminActivityLimit').onchange = async () => {
   try {
@@ -1220,8 +1308,12 @@ $('refreshAdmin').onclick = async () => {
   } catch (e) {
     adminNotice(e.message, 'error');
   }
-}; 
-// AUTO CHECK UI — V6
+};
+
+
+// =====================================
+// AUTO CHECK UI
+// =====================================
 
 function installAutoCheckToggle() {
   if ($('autoCheck')) return;
@@ -1260,8 +1352,8 @@ function installAutoCheckToggle() {
   title.textContent = 'Auto Check';
 
   description.textContent =
-    'Validate usernames after generating; ' +
-    'availability is confirmed only where supported';
+    'Automatically check generated usernames. ' +
+    'Discord uses third-party Pomelo reports.';
 
   Object.assign(description.style, {
     display: 'block',
@@ -1412,8 +1504,10 @@ function resetChecks() {
   saveCheckRun();
   searchId = null;
 
-  $('winter-v6-progress').hidden = true;
-  $('winter-v6-resume').hidden = true;
+  if ($('winter-v6-progress')) {
+    $('winter-v6-progress').hidden = true;
+    $('winter-v6-resume').hidden = true;
+  }
 }
 
 function counts() {
@@ -1433,6 +1527,23 @@ function counts() {
   return tally;
 }
 
+function discordDelayNeeded(reason) {
+  return (
+    reason === 'pomelo_cooldown' ||
+    reason === 'pomelo_rate_limited'
+  );
+}
+
+function saveCurrentResults() {
+  if (!checkRun) return;
+
+  checkRun.statuses = { ...statuses };
+  checkRun.reasons = { ...checkReasons };
+  checkRun.sources = { ...sources };
+
+  saveCheckRun();
+}
+
 async function runChecks() {
   if (checkingInProgress || generatingInProgress) {
     return;
@@ -1447,6 +1558,7 @@ async function runChecks() {
   }
 
   const version = generationVersion;
+  const discord = checkRun.platform === 'Discord';
 
   checkingInProgress = true;
   updateCheckButtons();
@@ -1460,7 +1572,9 @@ async function runChecks() {
     while (checkRun.pending.length) {
       const batch = checkRun.pending.slice(
         0,
-        BATCH_SIZE
+        discord
+          ? DISCORD_BATCH_SIZE
+          : DEFAULT_BATCH_SIZE
       );
 
       progress(
@@ -1500,6 +1614,7 @@ async function runChecks() {
       );
 
       let consumed = 0;
+      let providerLimited = false;
 
       for (const n of batch) {
         const item = returned.get(n);
@@ -1517,12 +1632,18 @@ async function runChecks() {
           : 'unknown';
 
         statuses[n] = status;
+        checkReasons[n] =
+          item.reason || 'no_reason_returned';
 
         if (
           ['available', 'claimed'].includes(status) &&
           item.reason !== 'already_recorded'
         ) {
           sources[n] = 'automatic';
+        }
+
+        if (discord && discordDelayNeeded(item.reason)) {
+          providerLimited = true;
         }
 
         checkRun.done.push(n);
@@ -1532,7 +1653,7 @@ async function runChecks() {
         consumed++;
       }
 
-      saveCheckRun();
+      saveCurrentResults();
       render();
 
       progress(
@@ -1542,7 +1663,22 @@ async function runChecks() {
       );
 
       if (consumed < batch.length) {
+        notice(
+          'Incomplete response. Tap Resume to continue.'
+        );
         break;
+      }
+
+      if (providerLimited) {
+        notice(
+          'Pomelo is rate limiting requests. ' +
+          'Remaining usernames can be checked later.'
+        );
+        break;
+      }
+
+      if (discord && checkRun.pending.length) {
+        await sleep(DISCORD_DELAY_MS);
       }
     }
 
@@ -1565,7 +1701,7 @@ async function runChecks() {
       ' · Taken: ' + tally.claimed +
       ' · Invalid: ' + tally.invalid +
       ' · Unknown: ' + tally.unknown +
-      '. Unknown does not mean available.'
+      '. See each result for its reason.'
     );
 
     resume.hidden = !remaining;
@@ -1628,6 +1764,7 @@ async function beginChecks() {
   );
 
   sources = {};
+  checkReasons = {};
 
   checkRun = {
     id: searchId,
@@ -1635,7 +1772,10 @@ async function beginChecks() {
     pending: data.results
       .filter(r => r.status === 'unknown')
       .map(r => r.username),
-    done: []
+    done: [],
+    statuses: { ...statuses },
+    reasons: {},
+    sources: {}
   };
 
   saveCheckRun();
@@ -1658,7 +1798,10 @@ async function beginChecks() {
   await runChecks();
 }
 
-// LOGIN AND GENERATOR — V6
+
+// =====================================
+// LOGIN AND GENERATOR
+// =====================================
 
 async function start() {
   try {
@@ -1734,9 +1877,15 @@ async function start() {
           ...saved.pending
         ];
 
-        statuses = Object.fromEntries(
-          names.map(n => [n, 'unknown'])
-        );
+        statuses = {
+          ...Object.fromEntries(
+            names.map(n => [n, 'unknown'])
+          ),
+          ...(saved.statuses || {})
+        };
+
+        checkReasons = saved.reasons || {};
+        sources = saved.sources || {};
 
         $('winter-v6-resume').hidden =
           !saved.pending.length;
@@ -1849,6 +1998,7 @@ $('platform').onchange = () => {
   names = [];
   statuses = {};
   sources = {};
+  checkReasons = {};
 
   resetChecks();
 
@@ -1889,6 +2039,7 @@ $('generateBtn').onclick = async () => {
     names = data.usernames;
     statuses = {};
     sources = {};
+    checkReasons = {};
 
     resetChecks();
 
@@ -1976,12 +2127,13 @@ $('txt').onclick = () =>
 $('csv').onclick = () =>
   download(
     'csv',
-    'username,status,platform\n' +
+    'username,status,platform,reason\n' +
     sortedNames().map(n =>
       [
         n,
         statuses[n] || 'not checked',
-        $('platform').value
+        $('platform').value,
+        checkReasons[n] || ''
       ].map(x =>
         '"' +
         String(x).replaceAll('"', '""') +
@@ -1998,7 +2150,9 @@ $('json').onclick = () =>
       sortedNames().map(n => ({
         username: n,
         status: statuses[n] || 'not checked',
-        platform: $('platform').value
+        platform: $('platform').value,
+        reason: checkReasons[n] || '',
+        source: sources[n] || ''
       })),
       null,
       2
@@ -2045,4 +2199,3 @@ document.addEventListener(
 
 // Restore login or remembered session.
 start();
-
