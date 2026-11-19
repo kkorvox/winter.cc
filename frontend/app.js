@@ -8,22 +8,17 @@ let searchId = null;
 let wordlist = null;
 let platforms = {};
 let isAdmin = false;
+let adminUserCache = [];
 
 const types = [
-  'Random letters',
-  'Letters + numbers',
-  'Real words / OG',
-  'Pronounceable',
-  'Aesthetic',
-  'Numbers only'
+  'Random letters', 'Letters + numbers',
+  'Real words / OG', 'Pronounceable',
+  'Aesthetic', 'Numbers only'
 ];
 
 const chars = [
-  'Lowercase',
-  'Uppercase',
-  'Numbers',
-  'Underscores',
-  'Periods'
+  'Lowercase', 'Uppercase', 'Numbers',
+  'Underscores', 'Periods'
 ];
 
 async function api(path, body, method = 'POST') {
@@ -36,12 +31,15 @@ async function api(path, body, method = 'POST') {
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
 
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw Error('Server returned an unexpected response');
+  }
 
   if (!response.ok) {
-    if (response.status === 401 && path !== 'login') {
-      showLogin();
-    }
+    if (response.status === 401 && path !== 'login') showLogin();
     throw Error(
       typeof data.detail === 'string'
         ? data.detail
@@ -55,6 +53,7 @@ async function api(path, body, method = 'POST') {
 function showLogin() {
   token = '';
   isAdmin = false;
+  adminUserCache = [];
   sessionStorage.removeItem('winter_token');
   $('app').hidden = true;
   $('login').hidden = false;
@@ -69,8 +68,11 @@ function notice(message) {
   $('message').textContent = message;
 }
 
-function adminNotice(message) {
-  $('adminMessage').textContent = message;
+function adminNotice(message, kind = 'success') {
+  const box = $('adminMessage');
+  box.textContent = message;
+  box.className = 'admin-feedback ' +
+    (kind === 'error' ? 'feedback-error' : 'feedback-success');
 }
 
 function checked(id) {
@@ -92,29 +94,22 @@ function config() {
 }
 
 function checkboxes(id, values, selected) {
-  $(id).replaceChildren(
-    ...values.map(value => {
-      const label = document.createElement('label');
-      label.className = 'check';
+  $(id).replaceChildren(...values.map(value => {
+    const label = document.createElement('label');
+    label.className = 'check';
 
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = value;
-      checkbox.checked = selected.includes(value);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = value;
+    checkbox.checked = selected.includes(value);
 
-      label.append(
-        checkbox,
-        document.createTextNode(' ' + value)
-      );
-
-      return label;
-    })
-  );
+    label.append(checkbox, document.createTextNode(' ' + value));
+    return label;
+  }));
 }
 
 function link(platform, name) {
   const n = encodeURIComponent(name);
-
   return {
     Discord: 'https://discord.com/',
     Roblox: 'https://www.roblox.com/users/profile',
@@ -126,16 +121,11 @@ function link(platform, name) {
 }
 
 function download(ext, content, mime) {
-  const url = URL.createObjectURL(
-    new Blob([content], { type: mime })
-  );
-
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
   const a = document.createElement('a');
   a.href = url;
-  a.download =
-    'wintercc-' + $('platform').value.toLowerCase() + '.' + ext;
+  a.download = 'wintercc-' + $('platform').value.toLowerCase() + '.' + ext;
   a.click();
-
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
@@ -145,17 +135,10 @@ function sortedNames() {
   );
 
   switch ($('sort').value) {
-    case 'az':
-      arr.sort();
-      break;
-    case 'za':
-      arr.sort().reverse();
-      break;
-    case 'short':
-      arr.sort((a, b) => a.length - b.length);
-      break;
+    case 'az': arr.sort(); break;
+    case 'za': arr.sort().reverse(); break;
+    case 'short': arr.sort((a, b) => a.length - b.length); break;
   }
-
   return arr;
 }
 
@@ -163,7 +146,8 @@ function render() {
   const list = $('resultList');
   list.replaceChildren();
 
-  const shown = sortedNames().slice(0, 500);
+  const filtered = sortedNames();
+  const shown = filtered.slice(0, 500);
 
   for (const n of shown) {
     const row = document.createElement('div');
@@ -221,7 +205,6 @@ function render() {
             username: n,
             status: select.value
           });
-
           statuses[n] = select.value;
           render();
         } catch (e) {
@@ -235,7 +218,7 @@ function render() {
     list.append(row);
   }
 
-  if (sortedNames().length > 500) {
+  if (filtered.length > 500) {
     const p = document.createElement('p');
     p.className = 'muted';
     p.textContent =
@@ -250,7 +233,6 @@ function render() {
 async function loadFavorites() {
   const favorites = await api('favorites');
   $('favStat').textContent = favorites.length;
-
   const box = $('favoriteList');
   box.replaceChildren();
 
@@ -258,8 +240,8 @@ async function loadFavorites() {
     const row = document.createElement('div');
     row.className = 'result';
 
-    const text = document.createElement('span');
-    text.textContent = x.username + ' · ' + x.platform;
+    const label = document.createElement('span');
+    label.textContent = x.username + ' · ' + x.platform;
 
     const button = document.createElement('button');
     button.className = 'tiny';
@@ -268,9 +250,8 @@ async function loadFavorites() {
     button.onclick = async () => {
       try {
         await api(
-          'favorites/' +
-          encodeURIComponent(x.platform) + '/' +
-          encodeURIComponent(x.username),
+          'favorites/' + encodeURIComponent(x.platform) +
+          '/' + encodeURIComponent(x.username),
           {},
           'DELETE'
         );
@@ -280,7 +261,7 @@ async function loadFavorites() {
       }
     };
 
-    row.append(text, button);
+    row.append(label, button);
     box.append(row);
   }
 }
@@ -293,13 +274,10 @@ async function loadHistory() {
   for (const s of history) {
     const row = document.createElement('div');
     row.className = 'result';
-
     row.textContent =
-      '#' + s.id + ' · ' +
-      s.platform + ' · ' +
+      '#' + s.id + ' · ' + s.platform + ' · ' +
       s.created.slice(0, 19).replace('T', ' ') +
       ' · ' + s.results.length + ' shown';
-
     box.append(row);
   }
 }
@@ -316,7 +294,6 @@ async function loadPresets() {
 
     button.onclick = () => {
       const c = p.config;
-
       $('platform').value = c.platform;
       $('amount').value = c.amount;
       $('prefix').value = c.prefix;
@@ -327,10 +304,8 @@ async function loadPresets() {
         Array.from({ length: 31 }, (_, i) => String(i + 2)),
         (c.lengths || []).map(String)
       );
-
       checkboxes('types', types, c.types || []);
       checkboxes('characters', chars, c.characters || []);
-
       notice('Preset loaded');
     };
 
@@ -338,7 +313,78 @@ async function loadPresets() {
   }
 }
 
-// OWNER DASHBOARD
+// OWNER DASHBOARD V2
+
+function renderAdminUsers() {
+  const box = $('adminUsers');
+  box.replaceChildren();
+
+  const query = $('adminUserSearch').value.trim().toLowerCase();
+  const users = adminUserCache.filter(user =>
+    user.username.toLowerCase().includes(query)
+  );
+
+  if (!users.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'No matching members found.';
+    box.append(empty);
+    return;
+  }
+
+  for (const user of users) {
+    const row = document.createElement('div');
+    row.className = 'result';
+
+    const info = document.createElement('span');
+    info.textContent =
+      '#' + user.id + ' · ' + user.username +
+      (user.is_admin ? ' · Owner' : ' · Member');
+
+    row.append(info);
+
+    if (!user.is_admin) {
+      const button = document.createElement('button');
+      button.className = 'tiny danger-button';
+      button.textContent = 'Delete User';
+
+      button.onclick = async () => {
+        const confirmed = confirm(
+          'Permanently delete "' + user.username + '"?\n\n' +
+          'This removes the account, licenses, and saved data. ' +
+          'This cannot be undone.'
+        );
+
+        if (!confirmed) return;
+
+        button.disabled = true;
+
+        try {
+          const result = await api(
+            'admin/users/' + user.id,
+            {},
+            'DELETE'
+          );
+
+          $('newLicenseBox').hidden = true;
+          $('newLicenseKey').value = '';
+          await loadAdmin();
+          adminNotice(
+            result.message || 'Member successfully deleted!',
+            'success'
+          );
+        } catch (e) {
+          adminNotice(e.message, 'error');
+          button.disabled = false;
+        }
+      };
+
+      row.append(button);
+    }
+
+    box.append(row);
+  }
+}
 
 async function loadAdmin() {
   if (!isAdmin) return;
@@ -348,6 +394,8 @@ async function loadAdmin() {
     api('admin/licenses')
   ]);
 
+  adminUserCache = users;
+
   const userSelect = $('licenseUser');
   const previousSelection = userSelect.value;
   userSelect.replaceChildren();
@@ -355,8 +403,8 @@ async function loadAdmin() {
   for (const user of users) {
     const option = document.createElement('option');
     option.value = user.id;
-    option.textContent = user.username +
-      (user.is_admin ? ' (Owner)' : '');
+    option.textContent =
+      user.username + (user.is_admin ? ' (Owner)' : '');
     userSelect.append(option);
   }
 
@@ -364,159 +412,180 @@ async function loadAdmin() {
     userSelect.value = previousSelection;
   }
 
-  const usersBox = $('adminUsers');
-  usersBox.replaceChildren();
-
-  for (const user of users) {
-    const row = document.createElement('div');
-    row.className = 'result';
-
-    const text = document.createElement('span');
-    text.textContent =
-      '#' + user.id + ' · ' + user.username +
-      (user.is_admin ? ' · Owner' : ' · Member');
-
-    row.append(text);
-    usersBox.append(row);
-  }
+  renderAdminUsers();
 
   const licensesBox = $('adminLicenses');
   licensesBox.replaceChildren();
 
+  if (!licenses.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'No licenses found.';
+    licensesBox.append(empty);
+  }
+
   for (const license of licenses) {
     const row = document.createElement('div');
     row.className = 'result';
-
-    const info = document.createElement('span');
 
     const expired = license.expires_at &&
       new Date(license.expires_at).getTime() <= Date.now();
 
     const status = license.revoked
       ? 'Revoked'
-      : expired
-        ? 'Expired'
-        : 'Active';
+      : expired ? 'Expired' : 'Active';
 
+    const info = document.createElement('span');
     info.textContent =
-      '#' + license.id +
-      ' · ' + license.username +
-      ' · ' + status +
-      ' · Expires: ' +
-      (license.expires_at || 'Never');
+      '#' + license.id + ' · ' + license.username + ' · ';
+
+    const statusLabel = document.createElement('strong');
+    statusLabel.className = 'license-status ' +
+      (status === 'Active' ? 'status-active' :
+       status === 'Revoked' ? 'status-revoked' : 'status-expired');
+    statusLabel.textContent = status;
+
+    const expiry = document.createElement('span');
+    expiry.className = 'license-expiry';
+    expiry.textContent =
+      'Expires: ' + (license.expires_at || 'Never');
 
     const button = document.createElement('button');
-    button.className = 'tiny';
-    button.textContent = license.revoked
-      ? 'Reactivate'
-      : 'Revoke';
+    button.className = 'tiny ' +
+      (license.revoked ? 'success-button' : 'danger-button');
+    button.textContent = license.revoked ? 'Reactivate' : 'Revoke';
 
     button.onclick = async () => {
-      const action = license.revoked
-        ? 'reactivate'
-        : 'revoke';
+      const action = license.revoked ? 'reactivate' : 'revoke';
 
       if (!confirm(
         'Are you sure you want to ' + action +
         ' license #' + license.id + '?'
       )) return;
 
+      button.disabled = true;
+
       try {
-        await api(
+        const result = await api(
           'admin/licenses/' + license.id + '/' + action,
           {}
         );
 
-        adminNotice('License updated successfully.');
         await loadAdmin();
+        adminNotice(
+          result.message || 'License updated successfully!',
+          'success'
+        );
       } catch (e) {
-        adminNotice(e.message);
+        adminNotice(e.message, 'error');
+        button.disabled = false;
       }
     };
 
-    row.append(info, button);
+    row.append(info, statusLabel, expiry, button);
     licensesBox.append(row);
   }
 }
 
+$('adminUserSearch').oninput = renderAdminUsers;
+
 $('createUserForm').onsubmit = async e => {
   e.preventDefault();
 
+  const username = $('newUsername').value.trim();
+  const password = $('newPassword').value;
+  const button = e.submitter || $('createUserForm').querySelector('button');
+
+  if (adminUserCache.some(
+    u => u.username.toLowerCase() === username.toLowerCase()
+  )) {
+    adminNotice('Username already exists!', 'error');
+    return;
+  }
+
+  button.disabled = true;
+
   try {
     const user = await api('admin/users', {
-      username: $('newUsername').value.trim(),
-      password: $('newPassword').value
+      username,
+      password
     });
 
     $('newUsername').value = '';
     $('newPassword').value = '';
 
-    adminNotice(
-      'Member "' + user.username +
-      '" created. Generate a license for them next.'
-    );
-
     await loadAdmin();
     $('licenseUser').value = String(user.id);
-  } catch (err) {
-    adminNotice(err.message);
+
+    adminNotice(
+      user.message || 'Member successfully created!',
+      'success'
+    );
+  } catch (e) {
+    adminNotice(e.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 };
 
 $('createLicenseForm').onsubmit = async e => {
   e.preventDefault();
 
+  const button = e.submitter ||
+    $('createLicenseForm').querySelector('button');
+
+  button.disabled = true;
+
   try {
     const expiry = $('licenseExpiry').value;
-
     const expiresAt = expiry
       ? new Date(expiry).toISOString()
       : null;
 
-    const data = await api(
+    const result = await api(
       'admin/users/' + $('licenseUser').value + '/licenses',
       { expires_at: expiresAt }
     );
 
-    $('newLicenseKey').value = data.license_key;
+    $('newLicenseKey').value = result.license_key;
     $('newLicenseBox').hidden = false;
 
-    adminNotice(
-      'License generated. Copy and save the key now.'
-    );
-
     await loadAdmin();
-  } catch (err) {
-    adminNotice(err.message);
+
+    adminNotice(
+      result.message || 'License successfully generated!',
+      'success'
+    );
+  } catch (e) {
+    adminNotice(e.message, 'error');
+  } finally {
+    button.disabled = false;
   }
 };
 
 $('copyLicense').onclick = async () => {
   try {
-    await navigator.clipboard.writeText(
-      $('newLicenseKey').value
-    );
-    adminNotice('License key copied.');
+    await navigator.clipboard.writeText($('newLicenseKey').value);
+    adminNotice('License key copied!', 'success');
   } catch (e) {
-    adminNotice('Copy failed. Select and copy the key manually.');
+    adminNotice('Could not copy the license key.', 'error');
   }
 };
 
 $('refreshAdmin').onclick = async () => {
   try {
     await loadAdmin();
-    adminNotice('Dashboard refreshed.');
+    adminNotice('Dashboard refreshed!', 'success');
   } catch (e) {
-    adminNotice(e.message);
+    adminNotice(e.message, 'error');
   }
 };
 
-// LOGIN AND INITIALIZATION
+// LOGIN AND GENERATOR
 
 async function start() {
   try {
     const me = await api('me');
-
     $('who').textContent = me.username;
     isAdmin = Boolean(me.is_admin);
 
@@ -524,7 +593,6 @@ async function start() {
     $('owner').hidden = !isAdmin;
 
     platforms = await api('platforms');
-
     $('platform').replaceChildren(
       ...Object.keys(platforms).map(name => {
         const option = document.createElement('option');
@@ -539,15 +607,11 @@ async function start() {
       Array.from({ length: 31 }, (_, i) => String(i + 2)),
       ['3', '4', '5']
     );
-
     checkboxes('types', types, [
-      'Random letters',
-      'Letters + numbers'
+      'Random letters', 'Letters + numbers'
     ]);
-
     checkboxes('characters', chars, [
-      'Lowercase',
-      'Numbers'
+      'Lowercase', 'Numbers'
     ]);
 
     showApp();
@@ -559,9 +623,7 @@ async function start() {
       ...(isAdmin ? [loadAdmin()] : [])
     ]);
   } catch (e) {
-    if (token) {
-      console.error('Initialization failed:', e);
-    }
+    console.error('Initialization failed:', e);
     showLogin();
   }
 }
@@ -584,8 +646,8 @@ $('loginForm').onsubmit = async e => {
     $('loginError').textContent = '';
 
     await start();
-  } catch (err) {
-    $('loginError').textContent = err.message;
+  } catch (e) {
+    $('loginError').textContent = e.message;
   }
 };
 
@@ -593,7 +655,6 @@ $('logout').onclick = async () => {
   try {
     await api('logout', {});
   } catch (e) {}
-
   showLogin();
 };
 
@@ -601,7 +662,6 @@ $('platform').onchange = () => {
   names = [];
   statuses = {};
   searchId = null;
-
   render();
   notice('Platform changed. Generate a new batch.');
 };
@@ -609,22 +669,17 @@ $('platform').onchange = () => {
 $('generateBtn').onclick = async () => {
   try {
     notice('Generating...');
-
     const data = await api('generate', config());
-
     names = data.usernames;
     statuses = {};
     searchId = null;
-
     render();
 
     notice(
-      'Generated ' +
-      data.generated.toLocaleString() +
+      'Generated ' + data.generated.toLocaleString() +
       ' unique usernames' +
       (data.generated < data.requested
-        ? ' (combination space exhausted)'
-        : '') + '.'
+        ? ' (combination space exhausted)' : '') + '.'
     );
   } catch (e) {
     notice(e.message);
@@ -633,9 +688,7 @@ $('generateBtn').onclick = async () => {
 
 $('checkBtn').onclick = async () => {
   try {
-    if (!names.length) {
-      throw Error('Generate usernames first');
-    }
+    if (!names.length) throw Error('Generate usernames first');
 
     const data = await api('check', {
       platform: $('platform').value,
@@ -646,15 +699,11 @@ $('checkBtn').onclick = async () => {
     statuses = Object.fromEntries(
       data.results.map(r => [r.username, r.status])
     );
-
     $('checkedStat').textContent = data.results.length;
 
     render();
     await loadHistory();
-
-    notice(
-      'Manual review started. Unknown is not verified.'
-    );
+    notice('Manual review started. Unknown is not verified.');
   } catch (e) {
     notice(e.message);
   }
@@ -665,11 +714,7 @@ $('savePreset').onclick = async () => {
   if (!name) return;
 
   try {
-    await api('presets', {
-      name,
-      config: config()
-    });
-
+    await api('presets', { name, config: config() });
     await loadPresets();
     notice('Preset saved');
   } catch (e) {
@@ -681,18 +726,14 @@ $('filter').oninput = render;
 $('sort').onchange = render;
 
 $('copy').onclick = () => {
-  navigator.clipboard.writeText(
-    sortedNames().join('\n')
-  ).then(
+  navigator.clipboard.writeText(sortedNames().join('\n')).then(
     () => notice('Copied usernames'),
     () => notice('Unable to copy usernames')
   );
 };
 
 $('txt').onclick = () => download(
-  'txt',
-  sortedNames().join('\n'),
-  'text/plain'
+  'txt', sortedNames().join('\n'), 'text/plain'
 );
 
 $('csv').onclick = () => download(
@@ -708,15 +749,11 @@ $('csv').onclick = () => download(
 
 $('json').onclick = () => download(
   'json',
-  JSON.stringify(
-    sortedNames().map(n => ({
-      username: n,
-      status: statuses[n] || 'not checked',
-      platform: $('platform').value
-    })),
-    null,
-    2
-  ),
+  JSON.stringify(sortedNames().map(n => ({
+    username: n,
+    status: statuses[n] || 'not checked',
+    platform: $('platform').value
+  })), null, 2),
   'application/json'
 );
 
