@@ -51,3 +51,6 @@ def setup_owner():
                 "INSERT INTO licenses(key_hash,user_id,revoked) VALUES(?,?,0)",
                 (key_hash, user_id)
             )
+
+def setup_owner():
+    return None
