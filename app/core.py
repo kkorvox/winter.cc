@@ -16,12 +16,41 @@ from psycopg.rows import dict_row
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 WORDS = [
-    "void", "ghost", "chrome", "angel", "vex", "nova",
-    "frost", "pixel", "night", "lunar", "zero", "echo",
-    "haze", "orbit", "drift", "glow", "shade", "storm",
-    "azure", "bliss", "velvet", "static", "raven",
-    "onyx", "winter"
+    "void", "ghost", "chrome", "angel", "vex",
+    "nova", "frost", "pixel", "night", "lunar",
+    "zero", "echo", "haze", "orbit", "drift",
+    "glow", "shade", "storm", "azure", "bliss",
+    "velvet", "static", "raven", "onyx", "winter",
+    "dusk", "mist", "moon", "star", "dream",
+    "fable", "cloud", "ash", "ember", "snow",
+    "dawn", "shade", "rift", "flux", "silk",
+    "neon", "wave", "glitch", "fate", "aura",
+    "zen", "iris", "rose", "opal", "sage",
+    "myth", "crypt", "hollow", "soul", "ivory"
 ]
+
+OG_WORDS = [
+    "void", "ghost", "angel", "frost", "night",
+    "zero", "echo", "haze", "orbit", "drift",
+    "glow", "shade", "storm", "bliss", "raven",
+    "onyx", "winter", "dusk", "mist", "moon",
+    "star", "dream", "cloud", "ash", "ember",
+    "snow", "dawn", "rift", "flux", "silk",
+    "neon", "wave", "fate", "aura", "zen",
+    "iris", "rose", "opal", "sage", "myth",
+    "soul", "ivory"
+]
+
+AESTHETIC_PARTS = [
+    "luv", "lune", "noir", "vex", "daze",
+    "sora", "yume", "kira", "nyx", "aeri",
+    "mira", "zora", "aura", "lumi", "veil",
+    "haze", "void", "nova", "dusk", "echo",
+    "luna", "vivi", "aria", "mori", "suki"
+]
+
+CONSONANTS = "bcdfghjklmnpqrstvwxyz"
+VOWELS = "aeiou"
 
 RULES = {
     "Discord": (
@@ -83,29 +112,16 @@ def init():
             ON users (LOWER(username))
         """)
 
-        conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS
-            created_at TEXT
-        """)
-
-        conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS
-            last_login TEXT
-        """)
-
-        conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS
-            login_count INTEGER NOT NULL DEFAULT 0
-        """)
-
-        conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS
-            suspended INTEGER NOT NULL DEFAULT 0
-        """)
+        for column in (
+            "created_at TEXT",
+            "last_login TEXT",
+            "login_count INTEGER NOT NULL DEFAULT 0",
+            "suspended INTEGER NOT NULL DEFAULT 0"
+        ):
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                + column
+            )
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS licenses (
@@ -222,10 +238,7 @@ def log_activity(user_id, action, details=None):
 def create_user(username, password, admin=False):
     username = username.strip()
 
-    if not re.fullmatch(
-        r"[a-zA-Z0-9_]{3,32}",
-        username
-    ):
+    if not re.fullmatch(r"[a-zA-Z0-9_]{3,32}", username):
         raise ValueError("Invalid username")
 
     if len(password) < 12:
@@ -358,10 +371,7 @@ def auth(username, password, key):
             (username,)
         ).fetchone()
 
-        if not user:
-            return None
-
-        if user["suspended"]:
+        if not user or user["suspended"]:
             return None
 
         if not bcrypt.checkpw(
@@ -449,6 +459,97 @@ def current_user(token):
         return dict(row) if row else None
 
 
+def valid_platform_name(platform, name):
+    if platform not in RULES:
+        return False
+
+    minimum, maximum, allowed = RULES[platform]
+
+    if not minimum <= len(name) <= maximum:
+        return False
+
+    if any(char not in allowed for char in name):
+        return False
+
+    if platform == "Discord":
+        if name != name.lower():
+            return False
+        if ".." in name:
+            return False
+
+    if platform == "Roblox":
+        if name.startswith("_") or name.endswith("_"):
+            return False
+        if name.count("_") > 1:
+            return False
+
+    if platform == "Instagram":
+        if name.endswith("."):
+            return False
+
+    if platform == "TikTok":
+        if name.endswith("."):
+            return False
+
+    if platform == "Telegram":
+        if name[0].isdigit():
+            return False
+
+    return True
+
+
+def pronounceable(rng, size):
+    result = []
+
+    for i in range(size):
+        alphabet = (
+            CONSONANTS if i % 2 == 0 else VOWELS
+        )
+        result.append(rng.choice(alphabet))
+
+    return "".join(result)
+
+
+def random_base(rng, pool, size):
+    return "".join(
+        rng.choices(pool, k=size)
+    )
+
+
+def fit_word(rng, words, size, pool):
+    exact = [w for w in words if len(w) == size]
+
+    if exact:
+        return rng.choice(exact)
+
+    shorter = [w for w in words if len(w) < size]
+
+    if shorter:
+        word = rng.choice(shorter)
+        remainder = size - len(word)
+
+        if remainder <= 3:
+            return word + random_base(
+                rng, pool, remainder
+            )
+
+    return None
+
+
+def aesthetic_base(rng, size):
+    options = []
+
+    for first in AESTHETIC_PARTS:
+        for second in AESTHETIC_PARTS:
+            if len(first) + len(second) == size:
+                options.append(first + second)
+
+    if options:
+        return rng.choice(options)
+
+    return None
+
+
 def candidates(
     platform,
     lengths,
@@ -464,12 +565,12 @@ def candidates(
 
     minimum, maximum, allowed = RULES[platform]
 
-    lengths = [
+    lengths = sorted({
         int(x)
         for x in lengths
         if str(x).isdigit()
         and minimum <= int(x) <= maximum
-    ]
+    })
 
     if not lengths:
         raise ValueError("No valid lengths")
@@ -486,9 +587,9 @@ def candidates(
     ]
 
     pool = "".join(
-        chars
-        for name, chars in selections
-        if name in characters
+        value
+        for label, value in selections
+        if label in characters
     )
 
     pool = "".join(
@@ -508,6 +609,10 @@ def candidates(
             "Invalid prefix or suffix"
         )
 
+    if platform == "Discord":
+        prefix = prefix.lower()
+        suffix = suffix.lower()
+
     if len(prefix) + len(suffix) > max(lengths):
         raise ValueError(
             "Prefix and suffix are too long"
@@ -515,98 +620,79 @@ def candidates(
 
     types = types or ["Random letters"]
 
+    supplied_words = wordlist if wordlist else WORDS
+
     words = [
         word.strip()
-        for word in (wordlist or WORDS)
+        for word in supplied_words
         if isinstance(word, str)
         and word.strip()
+        and all(char in allowed for char in word.strip())
     ]
 
-    words = [
-        word
-        for word in words
-        if all(char in allowed for char in word)
-    ] or WORDS
+    if not words:
+        words = [
+            word for word in WORDS
+            if all(char in allowed for char in word)
+        ]
 
     rng = random.SystemRandom()
+
     seen = set()
     output = []
     attempts = 0
-
-    consonants = "bcdfghjklmnpqrstvwxyz"
-    vowels = "aeiou"
+    maximum_attempts = max(2000, count * 45)
 
     while (
         len(output) < count
-        and attempts < max(1000, count * 35)
+        and attempts < maximum_attempts
     ):
         attempts += 1
 
         size = rng.choice(lengths)
-        middle = (
-            size - len(prefix) - len(suffix)
-        )
+        middle = size - len(prefix) - len(suffix)
 
         if middle < 0:
             continue
 
         mode = rng.choice(types)
+        base = None
 
         if mode == "Numbers only":
-            base = "".join(
-                rng.choices(
-                    string.digits,
-                    k=middle
-                )
+            base = random_base(
+                rng, string.digits, middle
             )
 
-        elif mode in (
-            "Real words / OG",
-            "Aesthetic"
-        ):
-            word = rng.choice(words)
-
-            base = (
-                word[:middle]
-                if len(word) >= middle
-                else word + "".join(
-                    rng.choices(
-                        pool,
-                        k=middle - len(word)
-                    )
-                )
+        elif mode == "Real words / OG":
+            base = fit_word(
+                rng, words, middle, pool
             )
+
+            if base is None:
+                base = pronounceable(rng, middle)
+
+        elif mode == "Aesthetic":
+            base = aesthetic_base(rng, middle)
+
+            if base is None:
+                base = pronounceable(rng, middle)
 
         elif mode == "Pronounceable":
-            base = "".join(
-                rng.choice(
-                    consonants
-                    if i % 2 == 0
-                    else vowels
-                )
-                for i in range(middle)
-            )
+            base = pronounceable(rng, middle)
 
         elif mode == "Letters + numbers":
             mixed = "".join(
-                char
-                for char in pool
+                char for char in pool
                 if char.isalnum()
             )
 
-            base = "".join(
-                rng.choices(
-                    mixed or pool,
-                    k=middle
-                )
+            base = random_base(
+                rng, mixed or pool, middle
             )
 
         else:
-            base = "".join(
-                rng.choices(
-                    pool,
-                    k=middle
-                )
+            base = random_base(
+                rng, pool, middle
             )
 
         name = prefix + base + suffix
@@ -617,10 +703,7 @@ def candidates(
         if len(name) not in lengths:
             continue
 
-        if any(
-            char not in allowed
-            for char in name
-        ):
+        if not valid_platform_name(platform, name):
             continue
 
         if name not in seen:
