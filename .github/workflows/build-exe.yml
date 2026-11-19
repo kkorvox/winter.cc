@@ -1,50 +1,58 @@
-
-name: Build winter.cc Windows EXE
+name: Build and publish winter.cc Windows EXE
 
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
-      - "desktop.py"
-      - ".github/workflows/build-exe.yml"
+      - 'desktop.py'
+      - '.github/workflows/build-exe.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
     name: Build Windows EXE
     runs-on: windows-latest
-
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pywebview pyinstaller
-
-      - name: Build executable
-        run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name wintercc --collect-all webview desktop.py
-
-      - name: Verify executable
+      - name: Install build dependencies
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/wintercc.exe")) {
-            throw "EXE build failed"
-          }
+          python -m pip install --upgrade pip
+          python -m pip install "pywebview>=5.0,<7" "pyinstaller>=6,<7"
 
-      - name: Upload EXE artifact
+      - name: Build app
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name wintercc --collect-all webview --hidden-import clr desktop.py
+          if (!(Test-Path 'dist/wintercc.exe')) { throw 'EXE build failed' }
+
+      - name: Save build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wintercc-windows
+          name: wintercc-windows-v7.7
           path: dist/wintercc.exe
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish or update latest Windows release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v7.7
+          name: winter.cc Desktop v7.7
+          body: |
+            Windows app powered by the same live winter.cc website.
+            Requires Internet and Microsoft Edge WebView2 Runtime.
+            Open the EXE and log in using your normal winter.cc account.
+          files: dist/wintercc.exe
+          make_latest: true
+          overwrite_files: true
