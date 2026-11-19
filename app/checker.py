@@ -1,24 +1,26 @@
 
+# winter.cc Username Checker V6.5
+# Full replacement for app/checker.py
+#
+# Discord: Pomelo third-party API
+# Roblox: signup username validation
+# Minecraft: existing profile lookup
+# Instagram/TikTok/Telegram: format validation only
+#
+# Pomelo is unofficial. Its results are reports,
+# not guarantees that Discord will accept a username.
+
 import json
 import re
 import threading
 import time
+
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
-
-
-# winter.cc Username Checker V6.3
-# Pomelo integration: TEST MODE
-#
-# Pomelo is a third-party service, not an
-# official Discord availability API.
-#
-# Automatic Discord checking remains
-# validation-only until testing is complete.
 
 
 SUPPORTED_PLATFORMS = (
@@ -43,15 +45,26 @@ CACHE_SECONDS = 300
 MIN_REQUEST_INTERVAL = 1.5
 MAX_BATCH_SIZE = 25
 MAX_WORKERS = 4
-REQUEST_TIMEOUT = 6
+REQUEST_TIMEOUT = 8
 MAX_RETRIES = 2
+
+# Free-tier pacing: one request per 5.5 seconds.
+POMELO_INTERVAL = 5.5
+
+# Avoid spending too long on a single HTTP request.
+# Your frontend already sends Discord names one at a time.
+POMELO_MAX_PER_BATCH = 4
 
 _cache_lock = threading.Lock()
 _schedule_lock = threading.Lock()
+_pomelo_lock = threading.Lock()
 
 _cache = {}
 _next_request = {}
 _cooldown = {}
+
+_pomelo_next_request = 0.0
+_pomelo_cooldown_until = 0.0
 
 
 def result(username, status="unknown", reason=""):
@@ -61,6 +74,10 @@ def result(username, status="unknown", reason=""):
         "reason": reason,
     }
 
+
+# =====================================
+# USERNAME VALIDATION
+# =====================================
 
 def validate_username(platform, username):
     if platform not in SUPPORTED_PLATFORMS:
@@ -84,6 +101,12 @@ def validate_username(platform, username):
 
         if ".." in username:
             return False, "discord_consecutive_periods"
+
+        if username.startswith("."):
+            return False, "discord_invalid_period_position"
+
+        if username.endswith("."):
+            return False, "discord_invalid_period_position"
 
         return True, "discord_format_valid"
 
@@ -149,6 +172,10 @@ def validate_username(platform, username):
 
     return True, "format_valid"
 
+
+# =====================================
+# NETWORK HELPERS
+# =====================================
 
 def _retry_after_seconds(value):
     if not value:
@@ -221,7 +248,7 @@ def _request_json(platform, url):
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "winter.cc/6.3",
+                "User-Agent": "winter.cc/6.5",
             },
         )
 
@@ -284,6 +311,10 @@ def _request_json(platform, url):
     return None, "network_error"
 
 
+# =====================================
+# ROBLOX CHECKER
+# =====================================
+
 def _check_roblox(username):
     params = urlencode({
         "request.username": username,
@@ -330,6 +361,10 @@ def _check_roblox(username):
     )
 
 
+# =====================================
+# MINECRAFT CHECKER
+# =====================================
+
 def _check_minecraft(username):
     url = (
         "https://api.mojang.com"
@@ -366,45 +401,66 @@ def _check_minecraft(username):
     return "unknown", "inconclusive"
 
 
-def _check_discord(username):
-    """
-    Default Discord checker.
+# =====================================
+# POMELO REQUEST SCHEDULING
+# =====================================
 
-    Pomelo is not enabled for automatic
-    checking until its responses have
-    been independently tested.
-    """
+def _pomelo_request_slot():
+    global _pomelo_next_request
 
-    return (
-        "unknown",
-        "discord_format_valid_availability_unverified"
-    )
+    with _pomelo_lock:
+        current = time.monotonic()
+
+        if current < _pomelo_cooldown_until:
+            return False
+
+        if current < _pomelo_next_request:
+            return False
+
+        _pomelo_next_request = (
+            current + POMELO_INTERVAL
+        )
+
+        return True
 
 
-# -------------------------------------
-# POMELO TEST FUNCTION
-# -------------------------------------
+def _pomelo_set_cooldown(seconds):
+    global _pomelo_cooldown_until
 
-_pomelo_lock = threading.Lock()
-_pomelo_next_request = 0.0
+    with _pomelo_lock:
+        _pomelo_cooldown_until = max(
+            _pomelo_cooldown_until,
+            time.monotonic() + seconds
+        )
 
+
+def _pomelo_unknown(username, reason):
+    return {
+        "username": username,
+        "status": "unknown",
+        "reason": reason,
+        "provider": "Pomelo",
+        "source": None,
+    }
+
+
+# =====================================
+# DISCORD / POMELO CHECKER
+# =====================================
 
 def test_pomelo_username(username):
     """
-    Test one Discord username against Pomelo.
+    Check one username through Pomelo.
 
-    Does not save results to the database.
-    Does not affect automatic checking.
+    This function is used by both:
+      - Automatic Discord checking
+      - The owner-only Pomelo test endpoint
 
-    Returns the third-party reported status,
-    source, and any error.
-
-    Free-tier pacing:
-    At most one request every 5 seconds
-    from this Python process.
+    Returns provider information and
+    a reason for any unsuccessful lookup.
     """
 
-    global _pomelo_next_request
+    username = str(username).strip().lower()
 
     valid, reason = validate_username(
         "Discord",
@@ -420,23 +476,15 @@ def test_pomelo_username(username):
             "source": None,
         }
 
-    with _pomelo_lock:
-        current = time.monotonic()
-
-        if current < _pomelo_next_request:
-            return {
-                "username": username,
-                "status": "unknown",
-                "reason": "pomelo_local_cooldown",
-                "provider": "Pomelo",
-                "source": None,
-            }
-
-        _pomelo_next_request = current + 5.0
+    if not _pomelo_request_slot():
+        return _pomelo_unknown(
+            username,
+            "pomelo_cooldown"
+        )
 
     payload = {
         "username": username,
-        "publicLookup": False,
+        "publicLookup": True,
         "useCache": True,
         "includeSuggestions": False,
         "includeUser": False,
@@ -444,11 +492,13 @@ def test_pomelo_username(username):
 
     request = Request(
         POMELO_URL,
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps(
+            payload
+        ).encode("utf-8"),
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "winter.cc/6.3",
+            "User-Agent": "winter.cc/6.5",
         },
         method="POST",
     )
@@ -462,71 +512,70 @@ def test_pomelo_username(username):
 
     except HTTPError as error:
         if error.code == 429:
+            delay = _retry_after_seconds(
+                error.headers.get(
+                    "Retry-After"
+                )
+            )
+
+            _pomelo_set_cooldown(delay)
             reason = "pomelo_rate_limited"
+
         elif error.code in (401, 403):
             reason = "pomelo_access_denied"
-        else:
-            reason = f"pomelo_http_{error.code}"
 
-        return {
-            "username": username,
-            "status": "unknown",
-            "reason": reason,
-            "provider": "Pomelo",
-            "source": None,
-        }
+        else:
+            reason = (
+                f"pomelo_http_{error.code}"
+            )
+
+        return _pomelo_unknown(
+            username,
+            reason
+        )
 
     except (
         URLError,
         TimeoutError,
         OSError
     ):
-        return {
-            "username": username,
-            "status": "unknown",
-            "reason": "pomelo_network_error",
-            "provider": "Pomelo",
-            "source": None,
-        }
+        return _pomelo_unknown(
+            username,
+            "pomelo_network_error"
+        )
 
     except (
         ValueError,
         UnicodeError
     ):
-        return {
-            "username": username,
-            "status": "unknown",
-            "reason": "pomelo_invalid_response",
-            "provider": "Pomelo",
-            "source": None,
-        }
+        return _pomelo_unknown(
+            username,
+            "pomelo_invalid_response"
+        )
 
     if not isinstance(data, dict):
-        return {
-            "username": username,
-            "status": "unknown",
-            "reason": "pomelo_invalid_response",
-            "provider": "Pomelo",
-            "source": None,
-        }
+        return _pomelo_unknown(
+            username,
+            "pomelo_invalid_response"
+        )
 
     details = data.get("data")
 
     if not isinstance(details, dict):
-        return {
-            "username": username,
-            "status": "unknown",
-            "reason": "pomelo_missing_data",
-            "provider": "Pomelo",
-            "source": None,
-        }
+        return _pomelo_unknown(
+            username,
+            "pomelo_missing_data"
+        )
 
     reported_status = str(
         details.get("status", "")
     ).upper()
 
     source = str(
-        details.get("servedFrom", "UNKNOWN")
+        details.get(
+            "servedFrom",
+            "UNKNOWN"
+        )
     ).upper()
 
     status_map = {
@@ -540,10 +589,22 @@ def test_pomelo_username(username):
         "unknown"
     )
 
+    if status == "unknown":
+        reason = (
+            "pomelo_unrecognized_status"
+            if reported_status
+            else "pomelo_missing_status"
+        )
+    else:
+        reason = (
+            "pomelo_reported_" +
+            reported_status.lower()
+        )
+
     return {
         "username": username,
         "status": status,
-        "reason": "third_party_report_unverified",
+        "reason": reason,
         "provider": "Pomelo",
         "provider_status": reported_status,
         "source": source,
@@ -551,9 +612,24 @@ def test_pomelo_username(username):
     }
 
 
-# -------------------------------------
+def _check_discord(username):
+    """
+    Automatic Discord availability checking.
+    """
+
+    data = test_pomelo_username(
+        username
+    )
+
+    return (
+        data["status"],
+        data["reason"]
+    )
+
+
+# =====================================
 # STANDARD CHECKER
-# -------------------------------------
+# =====================================
 
 def check_username(platform, username):
     if platform not in SUPPORTED_PLATFORMS:
@@ -562,6 +638,9 @@ def check_username(platform, username):
         )
 
     username = str(username).strip()
+
+    if platform == "Discord":
+        username = username.lower()
 
     valid, validation_reason = (
         validate_username(
@@ -593,7 +672,7 @@ def check_username(platform, username):
             return saved
 
     if platform == "Discord":
-        status, reason = _check_discord(
+        checked = test_pomelo_username(
             username
         )
 
@@ -602,22 +681,29 @@ def check_username(platform, username):
             username
         )
 
+        checked = result(
+            username,
+            status,
+            reason
+        )
+
     elif platform == "Minecraft":
         status, reason = _check_minecraft(
             username
         )
 
-    else:
-        status = "unknown"
-        reason = (
-            "format_valid_but_availability_unverified"
+        checked = result(
+            username,
+            status,
+            reason
         )
 
-    checked = result(
-        username,
-        status,
-        reason
-    )
+    else:
+        checked = result(
+            username,
+            "unknown",
+            "format_valid_but_availability_unverified"
+        )
 
     checked["cached"] = False
 
@@ -626,9 +712,29 @@ def check_username(platform, username):
         "network_error",
         "http_error",
         "invalid_response",
+        "pomelo_cooldown",
+        "pomelo_rate_limited",
+        "pomelo_access_denied",
+        "pomelo_network_error",
+        "pomelo_invalid_response",
+        "pomelo_missing_data",
+        "pomelo_missing_status",
+        "pomelo_unrecognized_status",
     }
 
-    if reason not in temporary_errors:
+    reason = checked.get(
+        "reason",
+        ""
+    )
+
+    is_temporary = (
+        reason in temporary_errors
+        or reason.startswith(
+            "pomelo_http_"
+        )
+    )
+
+    if not is_temporary:
         with _cache_lock:
             _cache[key] = (
                 dict(checked),
@@ -638,6 +744,10 @@ def check_username(platform, username):
 
     return checked
 
+
+# =====================================
+# BATCH CHECKING
+# =====================================
 
 def check_batch(platform, usernames):
     if platform not in SUPPORTED_PLATFORMS:
@@ -662,7 +772,67 @@ def check_batch(platform, usernames):
             "remaining": 0,
         }
 
-    if platform in NETWORK_CHECKERS:
+    if platform == "Discord":
+        results = []
+
+        attempted = 0
+
+        for username in batch:
+            valid, reason = validate_username(
+                platform,
+                username
+            )
+
+            if not valid:
+                results.append(
+                    result(
+                        username,
+                        "invalid",
+                        reason
+                    )
+                )
+                continue
+
+            key = (
+                platform,
+                username.lower()
+            )
+
+            with _cache_lock:
+                cached = _cache.get(key)
+
+                if (
+                    cached
+                    and cached[1] > time.monotonic()
+                ):
+                    saved = dict(cached[0])
+                    saved["cached"] = True
+                else:
+                    saved = None
+
+            if saved is not None:
+                results.append(saved)
+                continue
+
+            if attempted >= POMELO_MAX_PER_BATCH:
+                results.append(
+                    result(
+                        username,
+                        "unknown",
+                        "pomelo_batch_limit"
+                    )
+                )
+                continue
+
+            checked = check_username(
+                platform,
+                username
+            )
+
+            results.append(checked)
+            attempted += 1
+
+    elif platform in NETWORK_CHECKERS:
         with ThreadPoolExecutor(
             max_workers=min(
                 MAX_WORKERS,
