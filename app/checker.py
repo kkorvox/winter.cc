@@ -11,7 +11,15 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
-# winter.cc Username Checker V6.2
+# winter.cc Username Checker V6.3
+# Pomelo integration: TEST MODE
+#
+# Pomelo is a third-party service, not an
+# official Discord availability API.
+#
+# Automatic Discord checking remains
+# validation-only until testing is complete.
+
 
 SUPPORTED_PLATFORMS = (
     "Discord",
@@ -25,6 +33,10 @@ SUPPORTED_PLATFORMS = (
 NETWORK_CHECKERS = (
     "Roblox",
     "Minecraft",
+)
+
+POMELO_URL = (
+    "https://api.pomelo.lixqa.cc/v1/lookups"
 )
 
 CACHE_SECONDS = 300
@@ -51,12 +63,6 @@ def result(username, status="unknown", reason=""):
 
 
 def validate_username(platform, username):
-    """
-    Validate username formatting.
-
-    A valid username is not necessarily available.
-    """
-
     if platform not in SUPPORTED_PLATFORMS:
         return False, "unsupported_platform"
 
@@ -70,14 +76,14 @@ def validate_username(platform, username):
         if not 2 <= len(username) <= 32:
             return False, "discord_invalid_length"
 
-        if not re.fullmatch(r"[a-z0-9._]+", username):
+        if not re.fullmatch(
+            r"[a-z0-9._]+",
+            username
+        ):
             return False, "discord_invalid_characters"
 
         if ".." in username:
             return False, "discord_consecutive_periods"
-
-        # Discord allows periods at either end.
-        # Examples: ar. and .ar are format-valid.
 
         return True, "discord_format_valid"
 
@@ -215,7 +221,7 @@ def _request_json(platform, url):
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "winter.cc/6.2",
+                "User-Agent": "winter.cc/6.3",
             },
         )
 
@@ -362,13 +368,11 @@ def _check_minecraft(username):
 
 def _check_discord(username):
     """
-    Discord does not provide a supported
-    public arbitrary-username availability API.
+    Default Discord checker.
 
-    Formatting is checked separately.
-
-    Do not report 'available' without
-    reliable availability verification.
+    Pomelo is not enabled for automatic
+    checking until its responses have
+    been independently tested.
     """
 
     return (
@@ -376,6 +380,180 @@ def _check_discord(username):
         "discord_format_valid_availability_unverified"
     )
 
+
+# -------------------------------------
+# POMELO TEST FUNCTION
+# -------------------------------------
+
+_pomelo_lock = threading.Lock()
+_pomelo_next_request = 0.0
+
+
+def test_pomelo_username(username):
+    """
+    Test one Discord username against Pomelo.
+
+    Does not save results to the database.
+    Does not affect automatic checking.
+
+    Returns the third-party reported status,
+    source, and any error.
+
+    Free-tier pacing:
+    At most one request every 5 seconds
+    from this Python process.
+    """
+
+    global _pomelo_next_request
+
+    valid, reason = validate_username(
+        "Discord",
+        username
+    )
+
+    if not valid:
+        return {
+            "username": username,
+            "status": "invalid",
+            "reason": reason,
+            "provider": "local_validation",
+            "source": None,
+        }
+
+    with _pomelo_lock:
+        current = time.monotonic()
+
+        if current < _pomelo_next_request:
+            return {
+                "username": username,
+                "status": "unknown",
+                "reason": "pomelo_local_cooldown",
+                "provider": "Pomelo",
+                "source": None,
+            }
+
+        _pomelo_next_request = current + 5.0
+
+    payload = {
+        "username": username,
+        "publicLookup": False,
+        "useCache": True,
+        "includeSuggestions": False,
+        "includeUser": False,
+    }
+
+    request = Request(
+        POMELO_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "winter.cc/6.3",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=REQUEST_TIMEOUT
+        ) as response:
+            data = json.load(response)
+
+    except HTTPError as error:
+        if error.code == 429:
+            reason = "pomelo_rate_limited"
+        elif error.code in (401, 403):
+            reason = "pomelo_access_denied"
+        else:
+            reason = f"pomelo_http_{error.code}"
+
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": reason,
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    except (
+        URLError,
+        TimeoutError,
+        OSError
+    ):
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": "pomelo_network_error",
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    except (
+        ValueError,
+        UnicodeError
+    ):
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": "pomelo_invalid_response",
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    if not isinstance(data, dict):
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": "pomelo_invalid_response",
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    details = data.get("data")
+
+    if not isinstance(details, dict):
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": "pomelo_missing_data",
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    reported_status = str(
+        details.get("status", "")
+    ).upper()
+
+    source = str(
+        details.get("servedFrom", "UNKNOWN")
+    ).upper()
+
+    status_map = {
+        "AVAILABLE": "available",
+        "TAKEN": "claimed",
+        "RESERVED": "claimed",
+    }
+
+    status = status_map.get(
+        reported_status,
+        "unknown"
+    )
+
+    return {
+        "username": username,
+        "status": status,
+        "reason": "third_party_report_unverified",
+        "provider": "Pomelo",
+        "provider_status": reported_status,
+        "source": source,
+        "duration": data.get("duration"),
+    }
+
+
+# -------------------------------------
+# STANDARD CHECKER
+# -------------------------------------
 
 def check_username(platform, username):
     if platform not in SUPPORTED_PLATFORMS:
