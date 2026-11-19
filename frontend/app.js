@@ -1,26 +1,24 @@
 
-/* winter.cc Frontend V6.5
-   Full replacement
-   Includes Pomelo diagnostics and paced Discord checks.
-*/
+/* winter.cc Frontend V7.2 - Live availability tabs + Discord Auto Check.
+   Full replacement, preserving Owner Dashboard, login, favorites, presets and exports.
+   Backend pacing and Discord rate-limit responses are always respected. */
 
 const $ = id => document.getElementById(id);
-
 let token = sessionStorage.getItem('winter_token') || '';
-let names = [];
-let statuses = {};
-let sources = {};
-let checkReasons = {};
-let searchId = null;
-let wordlist = null;
-let platforms = {};
-let isAdmin = false;
-let adminUserCache = [];
-let selectedAdminMember = null;
-let checkingInProgress = false;
-let generatingInProgress = false;
-let generationVersion = 0;
+let names = [], statuses = {}, sources = {}, checkReasons = {}, searchId = null, wordlist = null, platforms = {};
+let isAdmin = false, adminUserCache = [], selectedAdminMember = null;
+let checkingInProgress = false, generatingInProgress = false, generationVersion = 0;
 let checkRun = null;
+let resultTab = 'all';
+
+const RESULT_TABS = [
+  ['all', 'All'],
+  ['available', 'Available'],
+  ['claimed', 'Taken'],
+  ['unknown', 'Unknown'],
+  ['pending', 'Pending'],
+  ['invalid', 'Invalid']
+];
 
 const types = [
   'Random letters',
@@ -41,7 +39,16 @@ const chars = [
 
 const DEFAULT_BATCH_SIZE = 25;
 const DISCORD_BATCH_SIZE = 1;
-const DISCORD_DELAY_MS = 5500;
+
+// Backend V7.0 already spaces Discord requests.
+const DISCORD_DELAY_MS = 900;
+
+const DISCORD_PAUSE_REASONS = new Set([
+  'discord_rate_limited',
+  'discord_access_blocked',
+  'discord_paused',
+  'discord_batch_limit'
+]);
 
 async function api(path, body, method = 'POST') {
   const response = await fetch('/api/' + path, {
@@ -49,13 +56,9 @@ async function api(path, body, method = 'POST') {
     credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? {
-        Authorization: 'Bearer ' + token
-      } : {})
+      ...(token ? { Authorization: 'Bearer ' + token } : {})
     },
-    ...(body === undefined ? {} : {
-      body: JSON.stringify(body)
-    })
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
 
   let data;
@@ -74,7 +77,7 @@ async function api(path, body, method = 'POST') {
     throw Error(
       typeof data.detail === 'string'
         ? data.detail
-        : 'Request failed (' + response.status + ')'
+        : 'Request failed'
     );
   }
 
@@ -109,16 +112,12 @@ function adminNotice(message, kind = 'success') {
 
   box.textContent = message;
   box.className = 'admin-feedback ' +
-    (kind === 'error'
-      ? 'feedback-error'
-      : 'feedback-success');
+    (kind === 'error' ? 'feedback-error' : 'feedback-success');
 }
 
 function checked(id) {
   return [
-    ...document.querySelectorAll(
-      '#' + id + ' input:checked'
-    )
+    ...document.querySelectorAll('#' + id + ' input:checked')
   ].map(x => x.value);
 }
 
@@ -136,22 +135,24 @@ function config() {
 }
 
 function checkboxes(id, values, selected) {
-  $(id).replaceChildren(...values.map(value => {
-    const label = document.createElement('label');
-    label.className = 'check';
+  $(id).replaceChildren(
+    ...values.map(value => {
+      const label = document.createElement('label');
+      label.className = 'check';
 
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.value = value;
-    input.checked = selected.includes(value);
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = value;
+      input.checked = selected.includes(value);
 
-    label.append(
-      input,
-      document.createTextNode(' ' + value)
-    );
+      label.append(
+        input,
+        document.createTextNode(' ' + value)
+      );
 
-    return label;
-  }));
+      return label;
+    })
+  );
 }
 
 function updateLengths(selected) {
@@ -167,9 +168,9 @@ function updateLengths(selected) {
   checkboxes(
     'lengths',
     values,
-    selected.filter(x =>
-      values.includes(String(x))
-    ).map(String)
+    selected
+      .filter(x => values.includes(String(x)))
+      .map(String)
   );
 }
 
@@ -192,11 +193,12 @@ function download(ext, content, mime) {
   );
 
   const a = document.createElement('a');
-
   a.href = url;
+
   a.download =
     'wintercc-' +
     $('platform').value.toLowerCase() +
+    (resultTab === 'all' ? '' : '-' + resultTab) +
     '.' + ext;
 
   a.click();
@@ -204,10 +206,44 @@ function download(ext, content, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
+// Pending = not yet checked.
+// Unknown = a completed check with no confirmed availability.
+
+function resultCategory(username, pendingSet) {
+  const status = statuses[username];
+
+  if (
+    status === 'available' ||
+    status === 'claimed' ||
+    status === 'invalid'
+  ) {
+    return status;
+  }
+
+  if (
+    !status ||
+    (pendingSet && pendingSet.has(username))
+  ) {
+    return 'pending';
+  }
+
+  return 'unknown';
+}
+
 function sortedNames() {
+  const query = $('filter').value.toLowerCase();
+
+  const pending = new Set(
+    checkRun && Array.isArray(checkRun.pending)
+      ? checkRun.pending
+      : []
+  );
+
   const arr = names.filter(n =>
-    n.toLowerCase().includes(
-      $('filter').value.toLowerCase()
+    n.toLowerCase().includes(query) &&
+    (
+      resultTab === 'all' ||
+      resultCategory(n, pending) === resultTab
     )
   );
 
@@ -228,6 +264,106 @@ function sortedNames() {
   return arr;
 }
 
+function resultCounts() {
+  const tally = {
+    all: names.length,
+    available: 0,
+    claimed: 0,
+    unknown: 0,
+    pending: 0,
+    invalid: 0
+  };
+
+  const pending = new Set(
+    checkRun && Array.isArray(checkRun.pending)
+      ? checkRun.pending
+      : []
+  );
+
+  for (const n of names) {
+    tally[resultCategory(n, pending)]++;
+  }
+
+  return tally;
+}
+
+// =====================================
+// LIVE AVAILABILITY TABS
+// =====================================
+
+function installResultTabs() {
+  if ($('winter-result-tabs')) return;
+
+  const tabs = document.createElement('div');
+
+  tabs.id = 'winter-result-tabs';
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute(
+    'aria-label',
+    'Filter usernames by availability'
+  );
+
+  for (const [key, label] of RESULT_TABS) {
+    const button = document.createElement('button');
+
+    button.type = 'button';
+    button.className = 'winter-result-tab';
+    button.dataset.category = key;
+
+    button.setAttribute('role', 'tab');
+    button.setAttribute(
+      'aria-controls',
+      'resultList'
+    );
+
+    button.onclick = () => {
+      resultTab = key;
+      render();
+    };
+
+    button.textContent = label;
+    tabs.append(button);
+  }
+
+  $('resultList').parentNode.insertBefore(
+    tabs,
+    $('resultList')
+  );
+}
+
+function updateResultTabs() {
+  const tabs = $('winter-result-tabs');
+
+  if (!tabs) return;
+
+  const tally = resultCounts();
+
+  for (const button of tabs.querySelectorAll('button')) {
+    const key = button.dataset.category;
+
+    const label = RESULT_TABS.find(
+      ([category]) => category === key
+    )[1];
+
+    const active = resultTab === key;
+
+    button.textContent =
+      label + ' (' + tally[key].toLocaleString() + ')';
+
+    button.classList.toggle(
+      'winter-active-tab',
+      active
+    );
+
+    button.setAttribute(
+      'aria-selected',
+      String(active)
+    );
+
+    button.tabIndex = 0;
+  }
+}
+
 function statusLabel(status) {
   return {
     available: 'Available',
@@ -239,68 +375,108 @@ function statusLabel(status) {
 }
 
 function friendlyReason(reason) {
-  const reasons = {
-    pomelo_cooldown:
-      'Pomelo cooldown: request was not sent',
-    pomelo_rate_limited:
-      'Pomelo rate limit reached',
-    pomelo_network_error:
-      'Could not connect to Pomelo',
-    pomelo_access_denied:
-      'Pomelo denied API access',
-    pomelo_invalid_response:
-      'Pomelo returned an invalid response',
-    pomelo_missing_data:
-      'Pomelo response was missing status data',
-    pomelo_batch_limit:
-      'Not checked: backend batch limit',
-    not_checked:
-      'Not checked by provider',
-    already_recorded:
-      'Previously saved result',
-    discord_format_valid_availability_unverified:
-      'Format valid; availability not verified',
-    format_valid_but_availability_unverified:
-      'Format valid; availability not verified',
-    no_existing_profile:
-      'No existing profile found; availability unconfirmed',
-    discord_invalid_length:
-      'Invalid Discord username length',
-    discord_invalid_characters:
-      'Invalid Discord username characters',
-    discord_consecutive_periods:
-      'Consecutive periods are not allowed',
-    third_party_report_unverified:
-      'Third-party report; not independently confirmed'
-  };
-
   if (!reason) return '';
 
-  if (reason.startsWith('pomelo_reported_')) {
-    return 'Pomelo reports: ' +
-      reason.slice('pomelo_reported_'.length);
+  const labels = {
+    discord_reported_available:
+      'Discord reports this username is not taken',
+
+    discord_reported_taken:
+      'Discord reports this username is taken',
+
+    discord_rate_limited:
+      'Discord rate limit reached. Try Resume later',
+
+    discord_access_blocked:
+      'Discord denied this server request. Try later',
+
+    discord_paused:
+      'Checking paused after a Discord limit',
+
+    discord_batch_limit:
+      'Batch limit; try Resume',
+
+    discord_unexpected_response:
+      'Discord returned an unexpected response',
+
+    discord_invalid_response:
+      'Discord returned invalid response data',
+
+    discord_timeout:
+      'Discord did not respond in time',
+
+    discord_network_error:
+      'Could not connect to Discord',
+
+    discord_ssl_error:
+      'Secure connection to Discord failed',
+
+    discord_dns_error:
+      'Could not resolve Discord server address',
+
+    discord_connection_refused:
+      'Discord connection refused',
+
+    already_recorded:
+      'Previously saved result',
+
+    no_existing_profile:
+      'No existing profile; availability unconfirmed',
+
+    format_valid_but_availability_unverified:
+      'Valid format; availability not verified',
+
+    roblox_signup_validation:
+      'Roblox signup validation result',
+
+    existing_profile:
+      'Existing profile found',
+
+    not_checked:
+      'Not checked by provider',
+
+    pomelo_timeout:
+      'Pomelo did not respond in time'
+  };
+
+  if (reason.startsWith('discord_http_')) {
+    return 'Discord request returned HTTP ' +
+      reason.slice('discord_http_'.length);
   }
 
-  return reasons[reason] ||
-    reason.replaceAll('_', ' ');
+  if (
+    reason.startsWith('discord_') &&
+    reason.includes('invalid')
+  ) {
+    return reason.replaceAll('_', ' ');
+  }
+
+  return labels[reason] || reason.replaceAll('_', ' ');
 }
 
+// =====================================
+// STYLES
+// =====================================
+
 function installStyles() {
-  if ($('winter-v65-style')) return;
+  if (document.getElementById('winter-v6-style')) {
+    return;
+  }
 
   const style = document.createElement('style');
-  style.id = 'winter-v65-style';
+  style.id = 'winter-v6-style';
 
   style.textContent = `
-    @keyframes winterRainbow {
+    @keyframes winterV6Rainbow {
       from { background-position: 0% 50%; }
       to { background-position: 200% 50%; }
     }
 
-    @keyframes winterGlow {
+    @keyframes winterV6Glow {
       0%, 100% {
         filter: drop-shadow(0 0 3px #ff3b8d);
       }
+
       50% {
         filter: drop-shadow(0 0 6px #00dfff);
       }
@@ -326,12 +502,12 @@ function installStyles() {
       -webkit-text-fill-color: transparent;
       font-weight: 900;
       animation:
-        winterRainbow 2.4s linear infinite,
-        winterGlow 3s ease-in-out infinite;
+        winterV6Rainbow 2.4s linear infinite,
+        winterV6Glow 3s ease-in-out infinite;
     }
 
     #resultList .winter-available-row {
-      border-color: rgba(177,90,255,.32) !important;
+      border-color: rgba(177, 90, 255, .32) !important;
     }
 
     #resultList .winter-available-row .status {
@@ -339,20 +515,10 @@ function installStyles() {
       font-weight: 700;
     }
 
-    #resultList .winter-reason {
-      display: block;
-      flex-basis: 100%;
-      width: 100%;
-      font-size: 11px;
-      opacity: .8;
-      overflow-wrap: anywhere;
-      margin-top: 4px;
-    }
-
     #winter-v6-progress {
       margin: 12px 0;
       padding: 12px;
-      border: 1px solid rgba(160,110,255,.3);
+      border: 1px solid rgba(160, 110, 255, .3);
       border-radius: 12px;
     }
 
@@ -365,7 +531,7 @@ function installStyles() {
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: rgba(150,150,180,.2);
+      background: rgba(150, 150, 180, .2);
       margin-top: 9px;
     }
 
@@ -385,6 +551,58 @@ function installStyles() {
       margin-top: 10px;
     }
 
+    #resultList .winter-reason {
+      display: block;
+      opacity: .8;
+      font-size: 11px;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+
+    #winter-result-tabs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      max-width: 100%;
+      padding: 8px 0 14px;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+    }
+
+    #winter-result-tabs .winter-result-tab {
+      flex: 0 0 auto;
+      white-space: nowrap;
+      border: 1px solid rgba(160, 140, 210, .35);
+      border-radius: 999px;
+      padding: 9px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      background: rgba(120, 80, 160, .10);
+      color: inherit;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+
+    #winter-result-tabs .winter-result-tab.winter-active-tab {
+      background: linear-gradient(
+        100deg,
+        #6030b5,
+        #843dd0
+      );
+      color: white;
+      border-color: #b18afe;
+      box-shadow: 0 0 0 1px rgba(177, 138, 254, .18);
+    }
+
+    #winter-result-tabs .winter-result-tab:focus-visible {
+      outline: 2px solid #a988ff;
+      outline-offset: 2px;
+    }
+
+    #resultList .winter-pending-status {
+      opacity: .65;
+    }
+
     @media (prefers-reduced-motion: reduce) {
       #resultList .winter-rgb-name {
         animation: none;
@@ -396,11 +614,23 @@ function installStyles() {
   document.head.append(style);
 }
 
+// =====================================
+// RENDER RESULTS
+// =====================================
+
 function render() {
+  updateResultTabs();
+
   const list = $('resultList');
   list.replaceChildren();
 
   const filtered = sortedNames();
+
+  const pending = new Set(
+    checkRun && Array.isArray(checkRun.pending)
+      ? checkRun.pending
+      : []
+  );
 
   for (const n of filtered.slice(0, 500)) {
     const row = document.createElement('div');
@@ -411,7 +641,17 @@ function render() {
 
     const status = document.createElement('span');
     status.className = 'status';
-    status.textContent = statusLabel(statuses[n]);
+
+    const category = resultCategory(n, pending);
+
+    status.textContent =
+      category === 'pending'
+        ? 'Pending'
+        : statusLabel(statuses[n]);
+
+    if (category === 'pending') {
+      status.classList.add('winter-pending-status');
+    }
 
     if (statuses[n] === 'available') {
       name.classList.add('winter-rgb-name');
@@ -437,6 +677,7 @@ function render() {
     };
 
     const open = document.createElement('a');
+
     open.textContent = '↗';
     open.title = 'Open platform/profile';
     open.href = link($('platform').value, n);
@@ -445,7 +686,10 @@ function render() {
 
     row.append(name, status, fav, open);
 
-    if (searchId && statuses[n] !== 'skipped') {
+    if (
+      searchId &&
+      statuses[n] !== 'skipped'
+    ) {
       const select = document.createElement('select');
 
       for (const x of [
@@ -454,18 +698,18 @@ function render() {
         'claimed'
       ]) {
         const option = document.createElement('option');
+
         option.value = x;
         option.textContent =
           statusLabel(x) + ' (manual)';
+
         select.append(option);
       }
 
-      select.value = [
-        'available',
-        'claimed'
-      ].includes(statuses[n])
-        ? statuses[n]
-        : 'unknown';
+      select.value =
+        ['available', 'claimed'].includes(statuses[n])
+          ? statuses[n]
+          : 'unknown';
 
       select.disabled = checkingInProgress;
 
@@ -479,8 +723,9 @@ function render() {
 
           statuses[n] = select.value;
           sources[n] = 'manual';
-          checkReasons[n] =
-            'Manually marked by user';
+          checkReasons[n] = 'Manually marked by user';
+
+          saveCurrentResults();
           render();
         } catch (e) {
           notice(e.message);
@@ -493,13 +738,16 @@ function render() {
 
     if (sources[n] === 'manual') {
       const tag = document.createElement('small');
+
       tag.className = 'muted';
       tag.textContent = 'User-reported';
+
       row.append(tag);
     }
 
     if (checkReasons[n]) {
       const detail = document.createElement('small');
+
       detail.className = 'winter-reason muted';
 
       detail.textContent =
@@ -517,14 +765,24 @@ function render() {
     list.append(row);
   }
 
+  if (!filtered.length && names.length) {
+    const p = document.createElement('p');
+
+    p.className = 'muted';
+    p.textContent = 'No usernames in this category yet.';
+
+    list.append(p);
+  }
+
   if (filtered.length > 500) {
     const p = document.createElement('p');
+
     p.className = 'muted';
 
     p.textContent =
-      'Showing first 500 filtered results. ' +
-      'Export includes all ' +
-      names.length + ' names.';
+      'Showing first 500 of ' +
+      filtered.length.toLocaleString() +
+      ' matching usernames. Copy and export include all matching names.';
 
     list.append(p);
   }
@@ -532,6 +790,10 @@ function render() {
   $('generatedStat').textContent =
     names.length.toLocaleString();
 }
+
+// =====================================
+// FAVORITES / HISTORY / PRESETS
+// =====================================
 
 async function loadFavorites() {
   const favorites = await api('favorites');
@@ -546,8 +808,7 @@ async function loadFavorites() {
     row.className = 'result';
 
     const label = document.createElement('span');
-    label.textContent =
-      x.username + ' · ' + x.platform;
+    label.textContent = x.username + ' · ' + x.platform;
 
     const button = document.createElement('button');
     button.className = 'tiny';
@@ -606,6 +867,7 @@ async function loadPresets() {
 
   for (const p of presets) {
     const button = document.createElement('button');
+
     button.className = 'secondary';
     button.textContent = p.name;
 
@@ -624,12 +886,7 @@ async function loadPresets() {
         (c.lengths || []).map(String)
       );
 
-      checkboxes(
-        'types',
-        types,
-        c.types || []
-      );
-
+      checkboxes('types', types, c.types || []);
       checkboxes(
         'characters',
         chars,
@@ -640,11 +897,10 @@ async function loadPresets() {
       statuses = {};
       sources = {};
       checkReasons = {};
-      searchId = null;
-      checkRun = null;
-      saveCheckRun();
 
+      resetChecks();
       render();
+
       notice('Preset loaded');
     };
 
@@ -652,9 +908,8 @@ async function loadPresets() {
   }
 }
 
-
 // =====================================
-// OWNER DASHBOARD V3
+// OWNER DASHBOARD
 // =====================================
 
 function formatDate(value) {
@@ -669,6 +924,7 @@ function formatDate(value) {
 
 function makeButton(label, className, action) {
   const button = document.createElement('button');
+
   button.type = 'button';
   button.className = className;
   button.textContent = label;
@@ -690,13 +946,17 @@ function makeButton(label, className, action) {
 
 function makeEmpty(message) {
   const p = document.createElement('p');
+
   p.className = 'muted';
   p.textContent = message;
+
   return p;
 }
 
 function licenseStatus(license) {
-  if (license.revoked) return 'Revoked';
+  if (license.revoked) {
+    return 'Revoked';
+  }
 
   if (
     license.expires_at &&
@@ -717,68 +977,73 @@ function licenseRow(license) {
   info.textContent =
     '#' + license.id +
     ' · ' + (license.username || 'Member') +
-    ' · Expires: ' +
-    formatDate(license.expires_at);
+    ' · Expires: ' + formatDate(license.expires_at);
 
   const status = licenseStatus(license);
+
   const badge = document.createElement('strong');
 
   badge.className =
     'license-status ' +
-    (status === 'Active'
-      ? 'status-active'
-      : status === 'Revoked'
-        ? 'status-revoked'
-        : 'status-expired');
+    (
+      status === 'Active'
+        ? 'status-active'
+        : status === 'Revoked'
+          ? 'status-revoked'
+          : 'status-expired'
+    );
 
   badge.textContent = status;
+
   row.append(info, badge);
 
   if (!license.revoked) {
     row.append(
-      makeButton('Renew', 'tiny secondary', async () => {
-        const entered = prompt(
-          'New expiration date (YYYY-MM-DD).\n' +
-          'Leave blank for no expiration:',
-          license.expires_at
-            ? license.expires_at.slice(0, 10)
-            : ''
-        );
-
-        if (entered === null) return;
-
-        let expiresAt = null;
-
-        if (entered.trim()) {
-          const date = new Date(
-            entered.trim() + 'T23:59:59'
+      makeButton(
+        'Renew',
+        'tiny secondary',
+        async () => {
+          const entered = prompt(
+            'New expiration date (YYYY-MM-DD).\n' +
+            'Leave blank for no expiration:',
+            license.expires_at
+              ? license.expires_at.slice(0, 10)
+              : ''
           );
 
-          if (Number.isNaN(date.getTime())) {
-            throw Error('Invalid expiration date');
+          if (entered === null) return;
+
+          let expiresAt = null;
+
+          if (entered.trim()) {
+            const date = new Date(
+              entered.trim() + 'T23:59:59'
+            );
+
+            if (Number.isNaN(date.getTime())) {
+              throw Error('Invalid expiration date');
+            }
+
+            expiresAt = date.toISOString();
           }
 
-          expiresAt = date.toISOString();
+          const result = await api(
+            'admin/licenses/' +
+            license.id +
+            '/renew',
+            { expires_at: expiresAt }
+          );
+
+          await loadAdmin();
+          adminNotice(result.message);
         }
-
-        const result = await api(
-          'admin/licenses/' +
-          license.id +
-          '/renew',
-          { expires_at: expiresAt }
-        );
-
-        await loadAdmin();
-        adminNotice(result.message);
-      })
+      )
     );
   }
 
   row.append(
     makeButton(
-      license.revoked
-        ? 'Reactivate'
-        : 'Revoke',
+      license.revoked ? 'Reactivate' : 'Revoke',
       license.revoked
         ? 'tiny success-button'
         : 'tiny danger-button',
@@ -787,13 +1052,17 @@ function licenseRow(license) {
           ? 'reactivate'
           : 'revoke';
 
-        if (!confirm(
-          'Are you sure you want to ' +
-          action +
-          ' license #' +
-          license.id +
-          '?'
-        )) return;
+        if (
+          !confirm(
+            'Are you sure you want to ' +
+            action +
+            ' license #' +
+            license.id +
+            '?'
+          )
+        ) {
+          return;
+        }
 
         const result = await api(
           'admin/licenses/' +
@@ -817,10 +1086,12 @@ function renderAdminUsers() {
   box.replaceChildren();
 
   const query = $('adminUserSearch')
-    .value.trim().toLowerCase();
+    .value
+    .trim()
+    .toLowerCase();
 
-  const users = adminUserCache.filter(user =>
-    user.username.toLowerCase().includes(query)
+  const users = adminUserCache.filter(u =>
+    u.username.toLowerCase().includes(query)
   );
 
   if (!users.length) {
@@ -839,48 +1110,38 @@ function renderAdminUsers() {
     info.textContent =
       '#' + user.id +
       ' · ' + user.username +
-      (user.is_admin
-        ? ' · Owner'
-        : ' · Member') +
-      (user.suspended
-        ? ' · Suspended'
-        : '') +
-      ' · Logins: ' +
-      (user.login_count || 0);
-
-    row.append(info);
+      (user.is_admin ? ' · Owner' : ' · Member') +
+      (user.suspended ? ' · Suspended' : '') +
+      ' · Logins: ' + (user.login_count || 0);
 
     row.append(
+      info,
       makeButton(
         'Details',
         'tiny secondary',
-        async () => {
-          await showMemberDetails(user.id);
-        }
+        async () => showMemberDetails(user.id)
       )
     );
 
     if (!user.is_admin) {
       row.append(
         makeButton(
-          user.suspended
-            ? 'Unsuspend'
-            : 'Suspend',
+          user.suspended ? 'Unsuspend' : 'Suspend',
           user.suspended
             ? 'tiny success-button'
             : 'tiny danger-button',
           async () => {
-            const suspend = !Boolean(
-              user.suspended
-            );
+            const suspend = !Boolean(user.suspended);
 
-            if (!confirm(
-              (suspend
-                ? 'Suspend '
-                : 'Unsuspend ') +
-              user.username +
-              '?'
-            )) return;
+            if (
+              !confirm(
+                (suspend ? 'Suspend ' : 'Unsuspend ') +
+                user.username +
+                '?'
+              )
+            ) {
+              return;
+            }
 
             const result = await api(
               'admin/users/' +
@@ -914,11 +1175,15 @@ function renderAdminUsers() {
               );
             }
 
-            if (!confirm(
-              'Reset password for ' +
-              user.username +
-              '? Their existing sessions will be signed out.'
-            )) return;
+            if (
+              !confirm(
+                'Reset password for ' +
+                user.username +
+                '? Their existing sessions will be signed out.'
+              )
+            ) {
+              return;
+            }
 
             const result = await api(
               'admin/users/' +
@@ -937,16 +1202,19 @@ function renderAdminUsers() {
           'Delete User',
           'tiny danger-button',
           async () => {
-            if (!confirm(
-              'Permanently delete "' +
-              user.username +
-              '"?\n\nThis removes their account, licenses, ' +
-              'favorites, history, and saved data.'
-            )) return;
+            if (
+              !confirm(
+                'Permanently delete "' +
+                user.username +
+                '"?\n\n' +
+                'This removes their account, licenses, favorites, history, and saved data.'
+              )
+            ) {
+              return;
+            }
 
             const result = await api(
-              'admin/users/' +
-              user.id,
+              'admin/users/' + user.id,
               {},
               'DELETE'
             );
@@ -978,7 +1246,6 @@ async function showMemberDetails(userId) {
   selectedAdminMember = userId;
 
   $('adminMemberDetails').hidden = false;
-
   $('adminMemberTitle').textContent =
     'Member: ' + data.member.username;
 
@@ -991,16 +1258,11 @@ async function showMemberDetails(userId) {
 
   info.textContent =
     'Account ID: ' + member.id +
-    ' · Created: ' +
-    formatDate(member.created_at) +
-    ' · Last login: ' +
-    formatDate(member.last_login) +
-    ' · Total logins: ' +
-    member.login_count +
+    ' · Created: ' + formatDate(member.created_at) +
+    ' · Last login: ' + formatDate(member.last_login) +
+    ' · Total logins: ' + member.login_count +
     ' · Status: ' +
-    (member.suspended
-      ? 'Suspended'
-      : 'Enabled');
+    (member.suspended ? 'Suspended' : 'Enabled');
 
   $('adminMemberInfo').append(info);
 
@@ -1036,11 +1298,12 @@ async function showMemberDetails(userId) {
 
       row.textContent =
         formatDate(event.created) +
-        ' · ' +
-        event.action +
-        (event.details
-          ? ' · ' + event.details
-          : '');
+        ' · ' + event.action +
+        (
+          event.details
+            ? ' · ' + event.details
+            : ''
+        );
 
       activityBox.append(row);
     }
@@ -1055,16 +1318,18 @@ async function showMemberDetails(userId) {
 async function loadAdminStats() {
   const s = await api('admin/stats');
 
-  for (const [id, key] of [
-    ['adminTotalUsers', 'total_users'],
-    ['adminActiveLicenses', 'active_licenses'],
-    ['adminGenerated', 'generated_usernames'],
-    ['adminSuspended', 'suspended_users'],
-    ['adminChecks', 'checked_usernames'],
-    ['adminRevoked', 'revoked_licenses']
-  ]) {
+  for (
+    const [id, key] of [
+      ['adminTotalUsers', 'total_users'],
+      ['adminActiveLicenses', 'active_licenses'],
+      ['adminGenerated', 'generated_usernames'],
+      ['adminSuspended', 'suspended_users'],
+      ['adminChecks', 'checked_usernames'],
+      ['adminRevoked', 'revoked_licenses']
+    ]
+  ) {
     $(id).textContent =
-      Number(s[key] || 0).toLocaleString();
+      Number(s[key]).toLocaleString();
   }
 }
 
@@ -1094,13 +1359,13 @@ async function loadAdminActivity() {
 
     info.textContent =
       formatDate(event.created) +
-      ' · ' +
-      event.username +
-      ' · ' +
-      event.action +
-      (event.details
-        ? ' · ' + event.details
-        : '');
+      ' · ' + event.username +
+      ' · ' + event.action +
+      (
+        event.details
+          ? ' · ' + event.details
+          : ''
+      );
 
     row.append(info);
     box.append(row);
@@ -1124,8 +1389,8 @@ async function loadAdmin() {
 
   for (const user of users) {
     const option = document.createElement('option');
-    option.value = user.id;
 
+    option.value = user.id;
     option.textContent =
       user.username +
       (user.is_admin ? ' (Owner)' : '');
@@ -1133,9 +1398,9 @@ async function loadAdmin() {
     select.append(option);
   }
 
-  if (users.some(
-    u => String(u.id) === previous
-  )) {
+  if (
+    users.some(u => String(u.id) === previous)
+  ) {
     select.value = previous;
   }
 
@@ -1150,7 +1415,9 @@ async function loadAdmin() {
     );
   } else {
     for (const license of licenses) {
-      box.append(licenseRow(license));
+      box.append(
+        licenseRow(license)
+      );
     }
   }
 
@@ -1160,9 +1427,11 @@ async function loadAdmin() {
   ]);
 
   if (selectedAdminMember !== null) {
-    if (users.some(
-      u => u.id === selectedAdminMember
-    )) {
+    if (
+      users.some(
+        u => u.id === selectedAdminMember
+      )
+    ) {
       await showMemberDetails(
         selectedAdminMember
       );
@@ -1172,7 +1441,6 @@ async function loadAdmin() {
     }
   }
 }
-
 
 // =====================================
 // OWNER DASHBOARD EVENTS
@@ -1206,10 +1474,13 @@ $('createUserForm').onsubmit = async e => {
     e.submitter ||
     $('createUserForm').querySelector('button');
 
-  if (adminUserCache.some(
-    u => u.username.toLowerCase() ===
-      username.toLowerCase()
-  )) {
+  if (
+    adminUserCache.some(
+      u =>
+        u.username.toLowerCase() ===
+        username.toLowerCase()
+    )
+  ) {
     adminNotice(
       'Username already exists!',
       'error'
@@ -1220,10 +1491,10 @@ $('createUserForm').onsubmit = async e => {
   button.disabled = true;
 
   try {
-    const user = await api('admin/users', {
-      username,
-      password
-    });
+    const user = await api(
+      'admin/users',
+      { username, password }
+    );
 
     $('newUsername').value = '';
     $('newPassword').value = '';
@@ -1310,9 +1581,8 @@ $('refreshAdmin').onclick = async () => {
   }
 };
 
-
 // =====================================
-// AUTO CHECK UI
+// AUTO CHECK TOGGLE
 // =====================================
 
 function installAutoCheckToggle() {
@@ -1335,6 +1605,7 @@ function installAutoCheckToggle() {
   });
 
   const input = document.createElement('input');
+
   input.type = 'checkbox';
   input.id = 'autoCheck';
   input.checked = false;
@@ -1352,8 +1623,7 @@ function installAutoCheckToggle() {
   title.textContent = 'Auto Check';
 
   description.textContent =
-    'Automatically check generated usernames. ' +
-    'Discord uses third-party Pomelo reports.';
+    'Validate usernames after generating; availability is confirmed only where supported';
 
   Object.assign(description.style, {
     display: 'block',
@@ -1370,6 +1640,10 @@ function installAutoCheckToggle() {
   );
 }
 
+// =====================================
+// PROGRESS BAR
+// =====================================
+
 function installProgress() {
   if ($('winter-v6-progress')) return;
 
@@ -1378,6 +1652,7 @@ function installProgress() {
   box.hidden = true;
 
   const label = document.createElement('div');
+
   label.id = 'winter-v6-label';
   label.textContent = 'Ready';
 
@@ -1390,6 +1665,7 @@ function installProgress() {
   track.append(fill);
 
   const resume = document.createElement('button');
+
   resume.id = 'winter-v6-resume';
   resume.type = 'button';
   resume.className = 'secondary';
@@ -1397,11 +1673,15 @@ function installProgress() {
   resume.hidden = true;
 
   resume.onclick = () =>
-    runChecks().catch(e =>
-      notice('Resume error: ' + e.message)
+    runChecks().catch(
+      e => notice('Resume error: ' + e.message)
     );
 
-  box.append(label, track, resume);
+  box.append(
+    label,
+    track,
+    resume
+  );
 
   $('checkBtn').parentNode.insertBefore(
     box,
@@ -1411,6 +1691,7 @@ function installProgress() {
 
 function progress(processed, total, label) {
   const box = $('winter-v6-progress');
+
   box.hidden = false;
 
   const percent = total
@@ -1418,10 +1699,14 @@ function progress(processed, total, label) {
     : 100;
 
   $('winter-v6-label').textContent =
-    label + ' · ' +
-    processed.toLocaleString() + '/' +
+    label +
+    ' · ' +
+    processed.toLocaleString() +
+    '/' +
     total.toLocaleString() +
-    ' (' + percent + '%)';
+    ' (' +
+    percent +
+    '%)';
 
   $('winter-v6-fill').style.width =
     percent + '%';
@@ -1432,29 +1717,31 @@ function progress(processed, total, label) {
 
 function updateCheckButtons() {
   $('checkBtn').disabled =
-    checkingInProgress || generatingInProgress;
+    checkingInProgress ||
+    generatingInProgress;
 
   $('generateBtn').disabled =
-    checkingInProgress || generatingInProgress;
+    checkingInProgress ||
+    generatingInProgress;
 
   if ($('winter-v6-resume')) {
     $('winter-v6-resume').disabled =
-      checkingInProgress || generatingInProgress;
+      checkingInProgress ||
+      generatingInProgress;
   }
 }
 
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
+  return new Promise(
+    resolve => setTimeout(resolve, ms)
   );
 }
 
 function temporary(error) {
-  return (
-    /failed to fetch|load failed|network|timeout|unexpected response|temporarily unavailable/i
-  ).test(
-    String(error.message || error)
-  );
+  return /failed to fetch|load failed|network|timeout|unexpected response|temporarily unavailable/i
+    .test(
+      String(error.message || error)
+    );
 }
 
 async function requestWithRetry(path, body) {
@@ -1479,73 +1766,65 @@ async function requestWithRetry(path, body) {
   throw error;
 }
 
+// =====================================
+// SAVE CHECK PROGRESS
+// =====================================
+
 function saveCheckRun() {
   try {
     if (checkRun) {
       sessionStorage.setItem(
         'winter_check_run',
-        JSON.stringify(checkRun)
+        JSON.stringify({
+          ...checkRun,
+          statuses: { ...statuses },
+          reasons: { ...checkReasons },
+          sources: { ...sources }
+        })
       );
     } else {
       sessionStorage.removeItem(
         'winter_check_run'
       );
     }
-  } catch (e) {
+  } catch (error) {
     console.warn(
       'Could not save check progress',
-      e
+      error
     );
+  }
+}
+
+function saveCurrentResults() {
+  if (checkRun) {
+    saveCheckRun();
   }
 }
 
 function resetChecks() {
   checkRun = null;
   saveCheckRun();
-  searchId = null;
 
-  if ($('winter-v6-progress')) {
-    $('winter-v6-progress').hidden = true;
-    $('winter-v6-resume').hidden = true;
-  }
+  searchId = null;
+  resultTab = 'all';
+
+  $('winter-v6-progress').hidden = true;
+  $('winter-v6-resume').hidden = true;
 }
 
 function counts() {
-  const tally = {
-    available: 0,
-    claimed: 0,
-    invalid: 0,
-    unknown: 0
-  };
-
-  for (const n of names) {
-    if (tally[statuses[n]] !== undefined) {
-      tally[statuses[n]]++;
-    }
-  }
-
-  return tally;
+  return resultCounts();
 }
 
-function discordDelayNeeded(reason) {
-  return (
-    reason === 'pomelo_cooldown' ||
-    reason === 'pomelo_rate_limited'
-  );
-}
-
-function saveCurrentResults() {
-  if (!checkRun) return;
-
-  checkRun.statuses = { ...statuses };
-  checkRun.reasons = { ...checkReasons };
-  checkRun.sources = { ...sources };
-
-  saveCheckRun();
-}
+// =====================================
+// RUN AVAILABILITY CHECKS
+// =====================================
 
 async function runChecks() {
-  if (checkingInProgress || generatingInProgress) {
+  if (
+    checkingInProgress ||
+    generatingInProgress
+  ) {
     return;
   }
 
@@ -1553,23 +1832,42 @@ async function runChecks() {
     throw Error('No search to resume');
   }
 
-  if (checkRun.platform !== $('platform').value) {
+  if (
+    checkRun.platform !==
+    $('platform').value
+  ) {
     throw Error('Platform changed');
   }
 
   const version = generationVersion;
-  const discord = checkRun.platform === 'Discord';
+  const discord =
+    checkRun.platform === 'Discord';
+
+  const resume = $('winter-v6-resume');
 
   checkingInProgress = true;
   updateCheckButtons();
 
-  const resume = $('winter-v6-resume');
   resume.hidden = true;
 
   let processed = checkRun.done.length;
+  let pausedReason = '';
 
   try {
-    while (checkRun.pending.length) {
+    while (
+      checkRun &&
+      checkRun.pending.length
+    ) {
+      if (
+        version !== generationVersion
+      ) {
+        return;
+      }
+
+      const total =
+        checkRun.done.length +
+        checkRun.pending.length;
+
       const batch = checkRun.pending.slice(
         0,
         discord
@@ -1579,7 +1877,7 @@ async function runChecks() {
 
       progress(
         processed,
-        processed + checkRun.pending.length,
+        total,
         'Checking ' + checkRun.platform
       );
 
@@ -1594,59 +1892,93 @@ async function runChecks() {
             usernames: batch
           }
         );
-      } catch (e) {
-        notice(
+      } catch (error) {
+        pausedReason =
           'Connection interrupted: ' +
-          e.message +
-          '. Tap Resume to continue.'
-        );
+          error.message;
+
         break;
       }
 
-      if (version !== generationVersion) {
-        break;
+      if (
+        version !== generationVersion
+      ) {
+        return;
       }
 
       const returned = new Map(
-        (response.results || []).map(
-          x => [x.username, x]
+        (
+          Array.isArray(response.results)
+            ? response.results
+            : []
         )
+          .filter(
+            item =>
+              item &&
+              typeof item.username === 'string'
+          )
+          .map(
+            item => [
+              item.username.toLowerCase(),
+              item
+            ]
+          )
       );
 
       let consumed = 0;
-      let providerLimited = false;
 
-      for (const n of batch) {
-        const item = returned.get(n);
+      for (const name of batch) {
+        const item = returned.get(
+          name.toLowerCase()
+        );
 
-        if (!item) break;
+        if (!item) {
+          pausedReason =
+            'Server response was incomplete';
 
-        const status = [
-          'available',
-          'claimed',
-          'invalid',
-          'unknown',
-          'skipped'
-        ].includes(item.status)
-          ? item.status
-          : 'unknown';
+          break;
+        }
 
-        statuses[n] = status;
-        checkReasons[n] =
-          item.reason || 'no_reason_returned';
+        const status =
+          [
+            'available',
+            'claimed',
+            'invalid',
+            'unknown',
+            'skipped'
+          ].includes(item.status)
+            ? item.status
+            : 'unknown';
+
+        const reason =
+          typeof item.reason === 'string'
+            ? item.reason
+            : 'no_reason_returned';
+
+        statuses[name] = status;
+        checkReasons[name] = reason;
+
+        // Keep rate-limited usernames pending
+        // so the user can resume later.
+
+        if (
+          discord &&
+          DISCORD_PAUSE_REASONS.has(reason)
+        ) {
+          pausedReason =
+            friendlyReason(reason);
+
+          break;
+        }
 
         if (
           ['available', 'claimed'].includes(status) &&
-          item.reason !== 'already_recorded'
+          reason !== 'already_recorded'
         ) {
-          sources[n] = 'automatic';
+          sources[name] = 'automatic';
         }
 
-        if (discord && discordDelayNeeded(item.reason)) {
-          providerLimited = true;
-        }
-
-        checkRun.done.push(n);
+        checkRun.done.push(name);
         checkRun.pending.shift();
 
         processed++;
@@ -1658,50 +1990,74 @@ async function runChecks() {
 
       progress(
         processed,
-        processed + checkRun.pending.length,
+        checkRun.done.length +
+        checkRun.pending.length,
         'Checking ' + checkRun.platform
       );
 
-      if (consumed < batch.length) {
-        notice(
-          'Incomplete response. Tap Resume to continue.'
-        );
+      if (pausedReason) {
         break;
       }
 
-      if (providerLimited) {
-        notice(
-          'Pomelo is rate limiting requests. ' +
-          'Remaining usernames can be checked later.'
-        );
+      if (
+        consumed < batch.length
+      ) {
+        pausedReason =
+          'Incomplete response';
+
         break;
       }
 
-      if (discord && checkRun.pending.length) {
-        await sleep(DISCORD_DELAY_MS);
+      if (
+        discord &&
+        checkRun.pending.length
+      ) {
+        await sleep(
+          DISCORD_DELAY_MS
+        );
       }
+    }
+
+    if (
+      version !== generationVersion
+    ) {
+      return;
     }
 
     try {
       await loadHistory();
-    } catch (e) {
-      console.warn(e);
+    } catch (error) {
+      console.warn(error);
     }
 
     const tally = counts();
-    const remaining = checkRun.pending.length;
+
+    const remaining =
+      checkRun
+        ? checkRun.pending.length
+        : 0;
+
+    const intro = remaining
+      ? (
+        'Check paused. ' +
+        remaining +
+        ' remaining. ' +
+        (
+          pausedReason
+            ? pausedReason + '. '
+            : ''
+        )
+      )
+      : 'Check finished. ';
 
     notice(
-      (remaining
-        ? 'Check paused. ' +
-          remaining +
-          ' remaining. '
-        : 'Check finished. ') +
+      intro +
       'Available: ' + tally.available +
       ' · Taken: ' + tally.claimed +
       ' · Invalid: ' + tally.invalid +
       ' · Unknown: ' + tally.unknown +
-      '. See each result for its reason.'
+      ' · Pending: ' + tally.pending +
+      '. Use the Results tabs to filter.'
     );
 
     resume.hidden = !remaining;
@@ -1717,19 +2073,29 @@ async function runChecks() {
   }
 }
 
+// =====================================
+// BEGIN CHECKING
+// =====================================
+
 async function beginChecks() {
-  if (checkingInProgress || generatingInProgress) {
+  if (
+    checkingInProgress ||
+    generatingInProgress
+  ) {
     return;
   }
 
   if (!names.length) {
-    throw Error('Generate usernames first');
+    throw Error(
+      'Generate usernames first'
+    );
   }
 
   if (
     checkRun &&
     checkRun.pending.length &&
-    checkRun.platform === $('platform').value
+    checkRun.platform ===
+      $('platform').value
   ) {
     await runChecks();
     return;
@@ -1741,7 +2107,9 @@ async function beginChecks() {
   let data;
 
   try {
-    notice('Creating availability search...');
+    notice(
+      'Creating availability search...'
+    );
 
     data = await requestWithRetry(
       'check',
@@ -1759,20 +2127,30 @@ async function beginChecks() {
 
   statuses = Object.fromEntries(
     data.results.map(
-      r => [r.username, r.status]
+      x => [
+        x.username,
+        x.status
+      ]
     )
   );
 
-  sources = {};
   checkReasons = {};
+  sources = {};
 
   checkRun = {
     id: searchId,
     platform: $('platform').value,
+
     pending: data.results
-      .filter(r => r.status === 'unknown')
-      .map(r => r.username),
+      .filter(
+        x => x.status === 'unknown'
+      )
+      .map(
+        x => x.username
+      ),
+
     done: [],
+
     statuses: { ...statuses },
     reasons: {},
     sources: {}
@@ -1788,26 +2166,30 @@ async function beginChecks() {
       'No usernames to check'
     );
 
-    notice('No unprocessed usernames.');
+    notice(
+      'No unprocessed usernames.'
+    );
 
     checkRun = null;
     saveCheckRun();
+
     return;
   }
 
   await runChecks();
 }
 
-
 // =====================================
-// LOGIN AND GENERATOR
+// APP INITIALIZATION
 // =====================================
 
 async function start() {
   try {
     const me = await api('me');
 
-    $('who').textContent = me.username;
+    $('who').textContent =
+      me.username;
+
     isAdmin = Boolean(me.is_admin);
 
     $('ownerNav').hidden = !isAdmin;
@@ -1816,18 +2198,24 @@ async function start() {
     platforms = await api('platforms');
 
     $('platform').replaceChildren(
-      ...Object.keys(platforms).map(name => {
-        const option =
-          document.createElement('option');
+      ...Object.keys(platforms).map(
+        name => {
+          const option =
+            document.createElement('option');
 
-        option.value = name;
-        option.textContent = name;
+          option.value = name;
+          option.textContent = name;
 
-        return option;
-      })
+          return option;
+        }
+      )
     );
 
-    updateLengths(['3', '4', '5']);
+    updateLengths([
+      '3',
+      '4',
+      '5'
+    ]);
 
     checkboxes(
       'types',
@@ -1850,6 +2238,8 @@ async function start() {
     installAutoCheckToggle();
     installProgress();
     installStyles();
+    installResultTabs();
+
     showApp();
 
     try {
@@ -1865,9 +2255,14 @@ async function start() {
         Array.isArray(saved.pending) &&
         Array.isArray(saved.done)
       ) {
-        $('platform').value = saved.platform;
+        $('platform').value =
+          saved.platform;
 
-        updateLengths(['3', '4', '5']);
+        updateLengths([
+          '3',
+          '4',
+          '5'
+        ]);
 
         checkRun = saved;
         searchId = saved.id;
@@ -1879,13 +2274,25 @@ async function start() {
 
         statuses = {
           ...Object.fromEntries(
-            names.map(n => [n, 'unknown'])
+            names.map(
+              n => [n, 'unknown']
+            )
           ),
-          ...(saved.statuses || {})
+
+          ...(
+            saved.statuses ||
+            saved.snapshot ||
+            {}
+          )
         };
 
-        checkReasons = saved.reasons || {};
-        sources = saved.sources || {};
+        sources = {
+          ...(saved.sources || {})
+        };
+
+        checkReasons = {
+          ...(saved.reasons || {})
+        };
 
         $('winter-v6-resume').hidden =
           !saved.pending.length;
@@ -1909,7 +2316,11 @@ async function start() {
       loadFavorites(),
       loadHistory(),
       loadPresets(),
-      ...(isAdmin ? [loadAdmin()] : [])
+      ...(
+        isAdmin
+          ? [loadAdmin()]
+          : []
+      )
     ]);
   } catch (e) {
     console.error(
@@ -1921,25 +2332,35 @@ async function start() {
   }
 }
 
+// =====================================
+// LOGIN / LOGOUT
+// =====================================
+
 $('loginForm').onsubmit = async e => {
   e.preventDefault();
 
   const button = $('loginForm')
-    .querySelector('button[type="submit"]');
+    .querySelector(
+      'button[type="submit"]'
+    );
 
   button.disabled = true;
+
   $('loginError').textContent = '';
 
   try {
     const remember =
       $('rememberLogin').checked;
 
-    const data = await api('login', {
-      username: $('user').value,
-      password: $('password').value,
-      license_key: $('key').value,
-      remember
-    });
+    const data = await api(
+      'login',
+      {
+        username: $('user').value,
+        password: $('password').value,
+        license_key: $('key').value,
+        remember
+      }
+    );
 
     if (remember) {
       token = '';
@@ -1976,7 +2397,10 @@ $('loginForm').onsubmit = async e => {
 
 $('logout').onclick = async () => {
   try {
-    await api('logout', {});
+    await api(
+      'logout',
+      {}
+    );
   } catch (e) {
     console.error(e);
   }
@@ -1984,6 +2408,10 @@ $('logout').onclick = async () => {
   resetChecks();
   showLogin();
 };
+
+// =====================================
+// PLATFORM CHANGE
+// =====================================
 
 $('platform').onchange = () => {
   if (
@@ -2002,7 +2430,11 @@ $('platform').onchange = () => {
 
   resetChecks();
 
-  updateLengths(['3', '4', '5']);
+  updateLengths([
+    '3',
+    '4',
+    '5'
+  ]);
 
   $('checkedStat').textContent = '0';
 
@@ -2013,6 +2445,10 @@ $('platform').onchange = () => {
   );
 };
 
+// =====================================
+// GENERATE USERNAMES
+// =====================================
+
 $('generateBtn').onclick = async () => {
   if (
     generatingInProgress ||
@@ -2022,12 +2458,15 @@ $('generateBtn').onclick = async () => {
   }
 
   generatingInProgress = true;
+
   updateCheckButtons();
 
   let shouldAuto = false;
 
   try {
-    notice('Generating usernames...');
+    notice(
+      'Generating usernames...'
+    );
 
     const data = await api(
       'generate',
@@ -2044,15 +2483,18 @@ $('generateBtn').onclick = async () => {
     resetChecks();
 
     $('checkedStat').textContent = '0';
+
     render();
 
     notice(
       'Generated ' +
       data.generated.toLocaleString() +
       ' unique usernames' +
-      (data.generated < data.requested
-        ? ' (combination space exhausted)'
-        : '') +
+      (
+        data.generated < data.requested
+          ? ' (combination space exhausted)'
+          : ''
+      ) +
       '.'
     );
 
@@ -2061,9 +2503,12 @@ $('generateBtn').onclick = async () => {
       names.length
     );
   } catch (e) {
-    notice('Error: ' + e.message);
+    notice(
+      'Error: ' + e.message
+    );
   } finally {
     generatingInProgress = false;
+
     updateCheckButtons();
   }
 
@@ -2088,77 +2533,133 @@ $('checkBtn').onclick = async () => {
   }
 };
 
+// =====================================
+// SAVE PRESET
+// =====================================
+
 $('savePreset').onclick = async () => {
-  const name = prompt('Preset name:');
+  const name = prompt(
+    'Preset name:'
+  );
 
   if (!name) return;
 
   try {
-    await api('presets', {
-      name,
-      config: config()
-    });
+    await api(
+      'presets',
+      {
+        name,
+        config: config()
+      }
+    );
 
     await loadPresets();
-    notice('Preset saved');
+
+    notice(
+      'Preset saved'
+    );
   } catch (e) {
     notice(e.message);
   }
 };
 
+// =====================================
+// FILTER / SORT
+// =====================================
+
 $('filter').oninput = render;
 $('sort').onchange = render;
 
-$('copy').onclick = () =>
-  navigator.clipboard.writeText(
-    sortedNames().join('\n')
-  ).then(
-    () => notice('Copied usernames'),
-    () => notice('Unable to copy usernames')
-  );
+// =====================================
+// COPY / EXPORT FILTERED RESULTS
+// =====================================
 
-$('txt').onclick = () =>
+$('copy').onclick = () => {
+  const selected = sortedNames();
+
+  if (!selected.length) {
+    notice(
+      'No usernames in this tab to copy'
+    );
+    return;
+  }
+
+  navigator.clipboard.writeText(
+    selected.join('\n')
+  ).then(
+    () => notice(
+      'Copied ' +
+      selected.length +
+      ' usernames from ' +
+      resultTab +
+      ' tab'
+    ),
+
+    () => notice(
+      'Unable to copy usernames'
+    )
+  );
+};
+
+$('txt').onclick = () => {
   download(
     'txt',
     sortedNames().join('\n'),
     'text/plain'
   );
+};
 
-$('csv').onclick = () =>
+$('csv').onclick = () => {
   download(
     'csv',
-    'username,status,platform,reason\n' +
-    sortedNames().map(n =>
-      [
-        n,
-        statuses[n] || 'not checked',
-        $('platform').value,
-        checkReasons[n] || ''
-      ].map(x =>
-        '"' +
-        String(x).replaceAll('"', '""') +
-        '"'
-      ).join(',')
-    ).join('\n'),
+
+    'username,status,platform\n' +
+    sortedNames()
+      .map(n =>
+        [
+          n,
+          statuses[n] || 'not checked',
+          $('platform').value
+        ]
+          .map(x =>
+            '"' +
+            String(x).replaceAll('"', '""') +
+            '"'
+          )
+          .join(',')
+      )
+      .join('\n'),
+
     'text/csv'
   );
+};
 
-$('json').onclick = () =>
+$('json').onclick = () => {
   download(
     'json',
+
     JSON.stringify(
-      sortedNames().map(n => ({
-        username: n,
-        status: statuses[n] || 'not checked',
-        platform: $('platform').value,
-        reason: checkReasons[n] || '',
-        source: sources[n] || ''
-      })),
+      sortedNames().map(
+        n => ({
+          username: n,
+          status:
+            statuses[n] ||
+            'not checked',
+          platform:
+            $('platform').value
+        })
+      ),
       null,
       2
     ),
+
     'application/json'
   );
+};
+
+// =====================================
+// WORDLIST IMPORT
+// =====================================
 
 $('wordlist').onchange = async e => {
   const file = e.target.files[0];
@@ -2166,11 +2667,15 @@ $('wordlist').onchange = async e => {
   if (!file) return;
 
   if (file.size > 2000000) {
-    notice('Wordlist must be under 2 MB');
+    notice(
+      'Wordlist must be under 2 MB'
+    );
     return;
   }
 
-  wordlist = (await file.text())
+  wordlist = (
+    await file.text()
+  )
     .split(/[\r\n,]+/)
     .map(x => x.trim())
     .filter(Boolean)
@@ -2183,6 +2688,10 @@ $('wordlist').onchange = async e => {
   );
 };
 
+// =====================================
+// KEYBOARD SHORTCUTS
+// =====================================
+
 document.addEventListener(
   'keydown',
   e => {
@@ -2192,10 +2701,14 @@ document.addEventListener(
       !$('app').hidden
     ) {
       e.preventDefault();
+
       $('generateBtn').click();
     }
   }
 );
 
-// Restore login or remembered session.
+// =====================================
+// START WINTER.CC
+// =====================================
+
 start();
