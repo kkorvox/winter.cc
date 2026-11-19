@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from .core import *
 
 init()
+setup_owner()
 app=FastAPI(title='winter.cc private API',docs_url=None,redoc_url=None,openapi_url=None)
 ROOT=Path(__file__).resolve().parent.parent
 class Login(BaseModel): username:str; password:str; license_key:str
