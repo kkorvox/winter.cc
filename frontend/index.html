@@ -55,6 +55,7 @@
         <a href="#presets">⚙ Presets</a>
         <a href="#downloads">↓ Downloads</a>
         <a href="#owner" id="ownerNav" hidden>♛ Owner Dashboard</a>
+
         <p class="aside-note">
           Availability requires supported verification.
           Unknown ≠ available.
@@ -73,16 +74,20 @@
 
         <section id="generate" class="panel">
           <h2>Generator settings</h2>
+
           <div class="fields">
             <label>Platform
               <select id="platform"></select>
             </label>
+
             <label>Custom amount
               <input id="amount" type="number" min="1" max="100000" value="100">
             </label>
+
             <label>Prefix
               <input id="prefix" placeholder="Optional">
             </label>
+
             <label>Suffix
               <input id="suffix" placeholder="Optional">
             </label>
@@ -90,8 +95,10 @@
 
           <h3>Lengths</h3>
           <div id="lengths" class="checks"></div>
+
           <h3>Generation styles</h3>
           <div id="types" class="checks"></div>
+
           <h3>Characters</h3>
           <div id="characters" class="checks"></div>
 
@@ -100,6 +107,7 @@
             <button id="checkBtn" class="secondary">Start manual check</button>
             <button id="savePreset" class="secondary">Save preset</button>
           </div>
+
           <div id="message" role="status"></div>
         </section>
 
@@ -108,10 +116,12 @@
             <small>Generated</small>
             <strong id="generatedStat">0</strong>
           </div>
+
           <div class="panel">
             <small>In current search</small>
             <strong id="checkedStat">0</strong>
           </div>
+
           <div class="panel">
             <small>Favorites</small>
             <strong id="favStat">0</strong>
@@ -121,8 +131,10 @@
         <section id="results" class="panel">
           <div class="section-head">
             <h2>Results</h2>
+
             <div class="actions">
               <input id="filter" placeholder="Filter usernames">
+
               <select id="sort">
                 <option value="original">Original order</option>
                 <option value="az">A–Z</option>
@@ -137,13 +149,16 @@
             <button id="txt" class="secondary">TXT</button>
             <button id="csv" class="secondary">CSV</button>
             <button id="json" class="secondary">JSON</button>
+
             <label class="filebtn">Import wordlist
               <input id="wordlist" type="file" accept=".txt,.csv" hidden>
             </label>
           </div>
+
           <p class="muted">
             Manual status is user-reported, not platform-confirmed.
           </p>
+
           <div id="resultList" class="results"></div>
         </section>
 
@@ -163,50 +178,107 @@
         </section>
 
         <section id="downloads" class="panel">
-          <h2>Downloads</h2>
-          <p class="muted">winter.cc Windows desktop launcher</p>
-          <button class="secondary" disabled>
-            Windows EXE — Coming Soon
-          </button>
+          <div class="eyebrow">DESKTOP APPLICATION / V1.0.0</div>
+
+          <h2>❄ winter.cc for Windows</h2>
+
           <p class="muted">
-            The executable must be built and uploaded first.
+            Take winter.cc to your desktop with a dedicated
+            Windows application. Access your generator,
+            favorites, history, presets, and account
+            dashboard from one window.
+          </p>
+
+          <div class="actions">
+            <a
+              href="https://github.com/kkorvox/winter.cc/releases/download/v1.0.0/wintercc.exe"
+              class="filebtn"
+              download
+            >
+              ↓ Download winter.cc for Windows (.exe)
+            </a>
+          </div>
+
+          <p class="muted">
+            Version 1.0.0 · Windows 10/11 · Internet required
+          </p>
+
+          <p class="muted">
+            Requires Microsoft Edge WebView2 Runtime.
+            The application connects to the official
+            winter.cc website.
+          </p>
+
+          <p class="muted">
+            <a
+              href="https://github.com/kkorvox/winter.cc/releases/tag/v1.0.0"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View release details
+            </a>
           </p>
         </section>
 
         <section id="owner" class="panel" hidden>
           <div class="eyebrow">ADMINISTRATION / V2.0</div>
+
           <h2>♛ Owner Dashboard</h2>
+
           <p class="muted">
             Manage member accounts, license access, and permissions.
           </p>
 
-          <div id="adminMessage" class="admin-feedback" role="status" aria-live="polite"></div>
+          <div
+            id="adminMessage"
+            class="admin-feedback"
+            role="status"
+            aria-live="polite"
+          ></div>
 
           <h3>Create member account</h3>
+
           <form id="createUserForm">
             <div class="fields">
               <label>Username
-                <input id="newUsername" required minlength="3" maxlength="32" autocomplete="off">
+                <input
+                  id="newUsername"
+                  required
+                  minlength="3"
+                  maxlength="32"
+                  autocomplete="off"
+                >
               </label>
+
               <label>Password
-                <input id="newPassword" type="password" required minlength="12" autocomplete="new-password">
+                <input
+                  id="newPassword"
+                  type="password"
+                  required
+                  minlength="12"
+                  autocomplete="new-password"
+                >
               </label>
             </div>
+
             <div class="actions">
               <button type="submit">Create Member</button>
             </div>
           </form>
 
           <h3>Generate license</h3>
+
           <form id="createLicenseForm">
             <div class="fields">
               <label>Member
                 <select id="licenseUser" required></select>
               </label>
+
               <label>Expiration (optional)
                 <input id="licenseExpiry" type="datetime-local">
               </label>
             </div>
+
             <div class="actions">
               <button type="submit">Generate License Key</button>
             </div>
@@ -214,9 +286,15 @@
 
           <div id="newLicenseBox" hidden>
             <h3>New license key — save it now</h3>
+
             <input id="newLicenseKey" readonly>
+
             <div class="actions">
-              <button id="copyLicense" type="button" class="secondary">
+              <button
+                id="copyLicense"
+                type="button"
+                class="secondary"
+              >
                 Copy License
               </button>
             </div>
@@ -224,21 +302,31 @@
 
           <div class="section-head">
             <h3>Members</h3>
+
             <div class="actions">
-              <input id="adminUserSearch" placeholder="Search members">
+              <input
+                id="adminUserSearch"
+                placeholder="Search members"
+              >
             </div>
           </div>
+
           <p class="muted">
             Deleting a member permanently removes their account,
             licenses, and saved data. Owner accounts cannot be deleted.
           </p>
+
           <div id="adminUsers"></div>
 
           <h3>Licenses</h3>
           <div id="adminLicenses"></div>
 
           <div class="actions">
-            <button id="refreshAdmin" class="secondary" type="button">
+            <button
+              id="refreshAdmin"
+              class="secondary"
+              type="button"
+            >
               Refresh Dashboard
             </button>
           </div>
