@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
-# winter.cc Username Checker V6.1
+# winter.cc Username Checker V6.2
 
 SUPPORTED_PLATFORMS = (
     "Discord",
@@ -52,16 +52,16 @@ def result(username, status="unknown", reason=""):
 
 def validate_username(platform, username):
     """
-    Validate known username formatting rules.
+    Validate username formatting.
 
-    Passing validation does not guarantee
-    that a username is available.
+    A valid username is not necessarily available.
     """
 
     if platform not in SUPPORTED_PLATFORMS:
         return False, "unsupported_platform"
 
-    username = str(username)
+    if not isinstance(username, str):
+        return False, "invalid_username_type"
 
     if not username:
         return False, "empty_username"
@@ -76,15 +76,18 @@ def validate_username(platform, username):
         if ".." in username:
             return False, "discord_consecutive_periods"
 
-        if username.startswith(".") or username.endswith("."):
-            return False, "discord_period_position"
+        # Discord allows periods at either end.
+        # Examples: ar. and .ar are format-valid.
 
         return True, "discord_format_valid"
 
     if platform == "Roblox":
         valid = (
             3 <= len(username) <= 20
-            and bool(re.fullmatch(r"[A-Za-z0-9_]+", username))
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9_]+",
+                username
+            ))
             and not username.startswith("_")
             and not username.endswith("_")
             and username.count("_") <= 1
@@ -93,28 +96,43 @@ def validate_username(platform, username):
     elif platform == "Instagram":
         valid = (
             1 <= len(username) <= 30
-            and bool(re.fullmatch(r"[A-Za-z0-9._]+", username))
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9._]+",
+                username
+            ))
             and not username.endswith(".")
         )
 
     elif platform == "TikTok":
         valid = (
             2 <= len(username) <= 24
-            and bool(re.fullmatch(r"[A-Za-z0-9._]+", username))
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9._]+",
+                username
+            ))
             and not username.endswith(".")
         )
 
     elif platform == "Telegram":
         valid = (
             5 <= len(username) <= 32
-            and bool(re.fullmatch(r"[A-Za-z0-9_]+", username))
-            and bool(re.match(r"[A-Za-z]", username))
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9_]+",
+                username
+            ))
+            and bool(re.match(
+                r"[A-Za-z]",
+                username
+            ))
         )
 
     elif platform == "Minecraft":
         valid = (
             3 <= len(username) <= 16
-            and bool(re.fullmatch(r"[A-Za-z0-9_]+", username))
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9_]+",
+                username
+            ))
         )
 
     else:
@@ -131,7 +149,10 @@ def _retry_after_seconds(value):
         return 60.0
 
     try:
-        return max(5.0, min(float(value), 300.0))
+        return max(
+            5.0,
+            min(float(value), 300.0)
+        )
     except (TypeError, ValueError):
         pass
 
@@ -139,35 +160,48 @@ def _retry_after_seconds(value):
         date = parsedate_to_datetime(value)
 
         if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
+            date = date.replace(
+                tzinfo=timezone.utc
+            )
 
         delay = (
             date - datetime.now(timezone.utc)
         ).total_seconds()
 
-        return max(5.0, min(delay, 300.0))
+        return max(
+            5.0,
+            min(delay, 300.0)
+        )
 
-    except (TypeError, ValueError, OverflowError):
+    except (
+        TypeError,
+        ValueError,
+        OverflowError
+    ):
         return 60.0
 
 
 def _wait_for_request_slot(platform):
     while True:
         with _schedule_lock:
-            now = time.monotonic()
+            current = time.monotonic()
 
-            if now < _cooldown.get(platform, 0):
+            if current < _cooldown.get(
+                platform, 0
+            ):
                 return False
 
-            next_allowed = _next_request.get(platform, 0)
+            next_allowed = _next_request.get(
+                platform, 0
+            )
 
-            if now >= next_allowed:
+            if current >= next_allowed:
                 _next_request[platform] = (
-                    now + MIN_REQUEST_INTERVAL
+                    current + MIN_REQUEST_INTERVAL
                 )
                 return True
 
-            wait = next_allowed - now
+            wait = next_allowed - current
 
         time.sleep(min(wait, 0.25))
 
@@ -181,27 +215,29 @@ def _request_json(platform, url):
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "winter.cc/6.1",
+                "User-Agent": "winter.cc/6.2",
             },
         )
 
         try:
             with urlopen(
                 request,
-                timeout=REQUEST_TIMEOUT,
+                timeout=REQUEST_TIMEOUT
             ) as response:
                 return json.load(response), None
 
         except HTTPError as error:
             if error.code == 429:
                 delay = _retry_after_seconds(
-                    error.headers.get("Retry-After")
+                    error.headers.get(
+                        "Retry-After"
+                    )
                 )
 
                 with _schedule_lock:
                     _cooldown[platform] = max(
                         _cooldown.get(platform, 0),
-                        time.monotonic() + delay,
+                        time.monotonic() + delay
                     )
 
                 return None, "rate_limited"
@@ -209,21 +245,34 @@ def _request_json(platform, url):
             if error.code == 404:
                 return None, "not_found"
 
-            if error.code in (500, 502, 503, 504):
+            if error.code in (
+                500, 502, 503, 504
+            ):
                 if attempt < MAX_RETRIES:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(
+                        0.5 * (attempt + 1)
+                    )
                     continue
 
             return None, "http_error"
 
-        except (URLError, TimeoutError, OSError):
+        except (
+            URLError,
+            TimeoutError,
+            OSError
+        ):
             if attempt < MAX_RETRIES:
-                time.sleep(0.5 * (attempt + 1))
+                time.sleep(
+                    0.5 * (attempt + 1)
+                )
                 continue
 
             return None, "network_error"
 
-        except (ValueError, UnicodeError):
+        except (
+            ValueError,
+            UnicodeError
+        ):
             return None, "invalid_response"
 
     return None, "network_error"
@@ -232,7 +281,9 @@ def _request_json(platform, url):
 def _check_roblox(username):
     params = urlencode({
         "request.username": username,
-        "request.birthday": "2000-01-01T00:00:00Z",
+        "request.birthday": (
+            "2000-01-01T00:00:00Z"
+        ),
         "request.context": "Signup",
     })
 
@@ -242,7 +293,10 @@ def _check_roblox(username):
         + params
     )
 
-    data, error = _request_json("Roblox", url)
+    data, error = _request_json(
+        "Roblox",
+        url
+    )
 
     if error:
         return "unknown", error
@@ -253,25 +307,40 @@ def _check_roblox(username):
     code = data.get("code")
 
     if code == 0:
-        return "available", "roblox_signup_validation"
+        return (
+            "available",
+            "roblox_signup_validation"
+        )
 
     if code == 1:
-        return "claimed", "roblox_signup_validation"
+        return (
+            "claimed",
+            "roblox_signup_validation"
+        )
 
-    return "unknown", "roblox_rejected_or_inconclusive"
+    return (
+        "unknown",
+        "roblox_rejected_or_inconclusive"
+    )
 
 
 def _check_minecraft(username):
     url = (
-        "https://api.mojang.com/users/profiles/"
-        "minecraft/"
+        "https://api.mojang.com"
+        "/users/profiles/minecraft/"
         + quote(username, safe="")
     )
 
-    data, error = _request_json("Minecraft", url)
+    data, error = _request_json(
+        "Minecraft",
+        url
+    )
 
     if error == "not_found":
-        return "unknown", "no_existing_profile"
+        return (
+            "unknown",
+            "no_existing_profile"
+        )
 
     if error:
         return "unknown", error
@@ -279,65 +348,86 @@ def _check_minecraft(username):
     if (
         isinstance(data, dict)
         and data.get("id")
-        and str(data.get("name", "")).lower()
-        == username.lower()
+        and str(
+            data.get("name", "")
+        ).lower() == username.lower()
     ):
-        return "claimed", "existing_profile"
+        return (
+            "claimed",
+            "existing_profile"
+        )
 
     return "unknown", "inconclusive"
 
 
 def _check_discord(username):
     """
-    Discord does not offer a supported public
-    arbitrary-username availability API.
+    Discord does not provide a supported
+    public arbitrary-username availability API.
 
-    Only local formatting is verified here.
+    Formatting is checked separately.
+
+    Do not report 'available' without
+    reliable availability verification.
     """
 
     return (
         "unknown",
-        "discord_format_valid_availability_unverified",
+        "discord_format_valid_availability_unverified"
     )
 
 
 def check_username(platform, username):
     if platform not in SUPPORTED_PLATFORMS:
-        raise ValueError("Unsupported platform")
+        raise ValueError(
+            "Unsupported platform"
+        )
 
     username = str(username).strip()
 
-    valid, validation_reason = validate_username(
-        platform,
-        username,
+    valid, validation_reason = (
+        validate_username(
+            platform,
+            username
+        )
     )
 
     if not valid:
         return result(
             username,
             "invalid",
-            validation_reason,
+            validation_reason
         )
 
-    key = (platform, username.lower())
-    now = time.monotonic()
+    key = (
+        platform,
+        username.lower()
+    )
+
+    current = time.monotonic()
 
     with _cache_lock:
         cached = _cache.get(key)
 
-        if cached and cached[1] > now:
+        if cached and cached[1] > current:
             saved = dict(cached[0])
             saved["cached"] = True
             return saved
 
     if platform == "Discord":
-        status, reason = _check_discord(username)
+        status, reason = _check_discord(
+            username
+        )
 
     elif platform == "Roblox":
-        status, reason = _check_roblox(username)
+        status, reason = _check_roblox(
+            username
+        )
 
     elif platform == "Minecraft":
-        status, reason = _check_minecraft(username)
+        status, reason = _check_minecraft(
+            username
+        )
 
     else:
         status = "unknown"
@@ -345,7 +435,12 @@ def check_username(platform, username):
             "format_valid_but_availability_unverified"
         )
 
-    checked = result(username, status, reason)
+    checked = result(
+        username,
+        status,
+        reason
+    )
+
     checked["cached"] = False
 
     temporary_errors = {
@@ -359,7 +454,8 @@ def check_username(platform, username):
         with _cache_lock:
             _cache[key] = (
                 dict(checked),
-                time.monotonic() + CACHE_SECONDS,
+                time.monotonic()
+                + CACHE_SECONDS
             )
 
     return checked
@@ -367,7 +463,9 @@ def check_username(platform, username):
 
 def check_batch(platform, usernames):
     if platform not in SUPPORTED_PLATFORMS:
-        raise ValueError("Unsupported platform")
+        raise ValueError(
+            "Unsupported platform"
+        )
 
     unique = list(dict.fromkeys(
         str(name).strip()
@@ -388,21 +486,27 @@ def check_batch(platform, usernames):
 
     if platform in NETWORK_CHECKERS:
         with ThreadPoolExecutor(
-            max_workers=min(MAX_WORKERS, len(batch))
+            max_workers=min(
+                MAX_WORKERS,
+                len(batch)
+            )
         ) as executor:
             results = list(
                 executor.map(
                     lambda name: check_username(
                         platform,
-                        name,
+                        name
                     ),
-                    batch,
+                    batch
                 )
             )
 
     else:
         results = [
-            check_username(platform, name)
+            check_username(
+                platform,
+                name
+            )
             for name in batch
         ]
 
