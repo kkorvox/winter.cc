@@ -10,6 +10,10 @@ let platforms = {};
 let isAdmin = false;
 let adminUserCache = [];
 let selectedAdminMember = null;
+let checkingInProgress = false;
+let generatingInProgress = false;
+let generationVersion = 0;
+let activeCheckVersion = 0;
 
 const types = [
   'Random letters', 'Letters + numbers',
@@ -63,6 +67,7 @@ function showLogin() {
   isAdmin = false;
   adminUserCache = [];
   selectedAdminMember = null;
+  generationVersion++;
 
   sessionStorage.removeItem('winter_token');
 
@@ -184,6 +189,21 @@ function sortedNames() {
   return arr;
 }
 
+function statusLabel(status) {
+  switch (status) {
+    case 'available':
+      return 'Available';
+    case 'claimed':
+      return 'Taken';
+    case 'unknown':
+      return 'Unknown';
+    case 'skipped':
+      return 'Skipped';
+    default:
+      return 'Not checked';
+  }
+}
+
 function render() {
   const list = $('resultList');
   list.replaceChildren();
@@ -200,8 +220,7 @@ function render() {
 
     const status = document.createElement('span');
     status.className = 'status';
-    status.textContent =
-      statuses[n] || 'Not checked';
+    status.textContent = statusLabel(statuses[n]);
 
     const fav = document.createElement('button');
     fav.className = 'tiny';
@@ -242,21 +261,24 @@ function render() {
         select.append(option);
       }
 
-      select.value =
-        statuses[n] || 'unknown';
+      select.value = statuses[n] || 'unknown';
+      select.disabled = checkingInProgress;
 
       select.onchange = async () => {
+        const chosen = select.value;
+
         try {
           await api('mark', {
             search_id: searchId,
             username: n,
-            status: select.value
+            status: chosen
           });
 
-          statuses[n] = select.value;
+          statuses[n] = chosen;
           render();
         } catch (e) {
           notice(e.message);
+          render();
         }
       };
 
@@ -956,6 +978,79 @@ $('refreshAdmin').onclick = async () => {
   }
 };
 
+// AUTO CHECK UI
+
+function installAutoCheckToggle() {
+  if ($('autoCheck')) return;
+
+  const generateButton = $('generateBtn');
+
+  const wrapper = document.createElement('label');
+  wrapper.className = 'auto-check-option';
+
+  wrapper.style.display = 'flex';
+  wrapper.style.alignItems = 'center';
+  wrapper.style.gap = '12px';
+  wrapper.style.padding = '12px 14px';
+  wrapper.style.margin = '12px 0';
+  wrapper.style.border = '1px solid rgba(150,150,170,.3)';
+  wrapper.style.borderRadius = '12px';
+  wrapper.style.cursor = 'pointer';
+
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.id = 'autoCheck';
+  input.checked = false;
+  input.style.width = '20px';
+  input.style.height = '20px';
+  input.style.accentColor = '#7c5cff';
+
+  const text = document.createElement('span');
+
+  const title = document.createElement('strong');
+  title.textContent = 'Auto Check';
+
+  const description = document.createElement('small');
+  description.textContent =
+    'Automatically check availability after generating';
+  description.style.display = 'block';
+  description.style.opacity = '.7';
+  description.style.marginTop = '3px';
+
+  text.append(title, description);
+  wrapper.append(input, text);
+
+  generateButton.parentNode.insertBefore(
+    wrapper,
+    generateButton
+  );
+}
+
+function updateCheckButtons() {
+  $('checkBtn').disabled =
+    checkingInProgress || generatingInProgress;
+
+  $('generateBtn').disabled =
+    checkingInProgress || generatingInProgress;
+}
+
+function updateCheckProgress(processed, total) {
+  $('checkedStat').textContent =
+    processed.toLocaleString();
+
+  const percent = total
+    ? Math.round((processed / total) * 100)
+    : 100;
+
+  notice(
+    'Checking availability... ' +
+    processed.toLocaleString() +
+    '/' +
+    total.toLocaleString() +
+    ' (' + percent + '%)'
+  );
+}
+
 // LOGIN AND GENERATOR
 
 async function start() {
@@ -998,6 +1093,7 @@ async function start() {
       'Numbers'
     ]);
 
+    installAutoCheckToggle();
     showApp();
 
     await Promise.all([
@@ -1070,6 +1166,12 @@ $('logout').onclick = async () => {
 };
 
 $('platform').onchange = () => {
+  if (checkingInProgress || generatingInProgress) {
+    notice('Wait for the current operation to finish.');
+    return;
+  }
+
+  generationVersion++;
   names = [];
   statuses = {};
   searchId = null;
@@ -1080,15 +1182,185 @@ $('platform').onchange = () => {
   notice('Platform changed. Generate a new batch.');
 };
 
-$('generateBtn').onclick = async () => {
+async function runAvailabilityCheck() {
+  if (checkingInProgress) return;
+
+  if (!names.length) {
+    throw Error('Generate usernames first');
+  }
+
+  checkingInProgress = true;
+  activeCheckVersion = generationVersion;
+  updateCheckButtons();
+
+  const platform = $('platform').value;
+  const batchNames = [...names];
+  const batchSize = 25;
+
+  let processed = 0;
+  let available = 0;
+  let taken = 0;
+  let unknown = 0;
+  let rateLimited = false;
+  let stoppedEarly = false;
+
   try {
-    notice('Generating...');
+    notice('Creating availability search...');
+
+    const data = await api('check', {
+      platform,
+      usernames: batchNames
+    });
+
+    if (activeCheckVersion !== generationVersion) {
+      throw Error('Generated usernames changed during check');
+    }
+
+    searchId = data.search_id;
+
+    statuses = Object.fromEntries(
+      data.results.map(row => [
+        row.username,
+        row.status
+      ])
+    );
+
+    render();
+
+    const pending = data.results
+      .filter(row => row.status === 'unknown')
+      .map(row => row.username);
+
+    const total = pending.length;
+
+    $('checkedStat').textContent = '0';
+
+    if (
+      platform !== 'Roblox' &&
+      platform !== 'Minecraft'
+    ) {
+      notice(
+        platform +
+        ': automatic availability verification is ' +
+        'not supported. Results remain Unknown. ' +
+        'You can review usernames manually.'
+      );
+
+      await loadHistory();
+      return;
+    }
+
+    for (
+      let offset = 0;
+      offset < pending.length;
+      offset += batchSize
+    ) {
+      const batch = pending.slice(
+        offset,
+        offset + batchSize
+      );
+
+      updateCheckProgress(processed, total);
+
+      const result = await api('check/auto', {
+        platform,
+        search_id: searchId,
+        usernames: batch
+      });
+
+      if (activeCheckVersion !== generationVersion) {
+        throw Error('Generated usernames changed during check');
+      }
+
+      const returnedNames = new Set();
+
+      for (const item of result.results || []) {
+        if (!batch.includes(item.username)) continue;
+        if (returnedNames.has(item.username)) continue;
+
+        returnedNames.add(item.username);
+
+        const status = [
+          'available',
+          'claimed',
+          'unknown'
+        ].includes(item.status)
+          ? item.status
+          : 'unknown';
+
+        statuses[item.username] = status;
+
+        if (status === 'available') {
+          available++;
+        } else if (status === 'claimed') {
+          taken++;
+        } else {
+          unknown++;
+        }
+
+        processed++;
+
+        if (item.reason === 'rate_limited') {
+          rateLimited = true;
+        }
+      }
+
+      render();
+      updateCheckProgress(processed, total);
+
+      if (
+        rateLimited ||
+        Number(result.remaining || 0) > 0 ||
+        returnedNames.size < batch.length
+      ) {
+        stoppedEarly = true;
+        break;
+      }
+    }
+
+    await loadHistory();
+
+    const remaining = Math.max(
+      0,
+      total - processed
+    );
+
+    notice(
+      'Availability check finished. ' +
+      'Available: ' + available +
+      ' · Taken: ' + taken +
+      ' · Unknown: ' + (unknown + remaining) +
+      ' · Processed: ' + processed + '/' + total +
+      (rateLimited
+        ? ' · Rate limit reached. Checking stopped.'
+        : stoppedEarly
+          ? ' · Checking stopped early.'
+          : '') +
+      ' · Unknown does not mean available.'
+    );
+
+  } finally {
+    checkingInProgress = false;
+    updateCheckButtons();
+    render();
+  }
+}
+
+$('generateBtn').onclick = async () => {
+  if (generatingInProgress || checkingInProgress) return;
+
+  generatingInProgress = true;
+  updateCheckButtons();
+
+  try {
+    notice('Generating usernames...');
 
     const data = await api(
       'generate',
       config()
     );
 
+    generationVersion++;
     names = data.usernames;
     statuses = {};
     searchId = null;
@@ -1105,42 +1377,37 @@ $('generateBtn').onclick = async () => {
         : '') +
       '.'
     );
+
+    const autoCheck = $('autoCheck');
+
+    if (autoCheck && autoCheck.checked && names.length) {
+      notice(
+        'Generated ' +
+        names.length.toLocaleString() +
+        ' usernames. Starting Auto Check...'
+      );
+
+      generatingInProgress = false;
+      updateCheckButtons();
+
+      await runAvailabilityCheck();
+    }
+
   } catch (e) {
-    notice(e.message);
+    notice('Error: ' + e.message);
+  } finally {
+    generatingInProgress = false;
+    updateCheckButtons();
   }
 };
 
 $('checkBtn').onclick = async () => {
+  if (checkingInProgress || generatingInProgress) return;
+
   try {
-    if (!names.length) {
-      throw Error('Generate usernames first');
-    }
-
-    const data = await api('check', {
-      platform: $('platform').value,
-      usernames: names
-    });
-
-    searchId = data.search_id;
-
-    statuses = Object.fromEntries(
-      data.results.map(row => [
-        row.username,
-        row.status
-      ])
-    );
-
-    $('checkedStat').textContent =
-      data.results.length;
-
-    render();
-    await loadHistory();
-
-    notice(
-      'Manual review started. Unknown is not verified.'
-    );
+    await runAvailabilityCheck();
   } catch (e) {
-    notice(e.message);
+    notice('Checking error: ' + e.message);
   }
 };
 
