@@ -11,11 +11,11 @@ from .core import (
     auth,
     current_user,
     candidates,
-    start_search,
+        start_search,
+    hash_key,
     RULES,
     now,
 )
-
 init()
 setup_owner()
 app=FastAPI(title='winter.cc private API',docs_url=None,redoc_url=None,openapi_url=None)
