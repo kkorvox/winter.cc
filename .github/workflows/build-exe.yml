@@ -1,0 +1,50 @@
+
+name: Build winter.cc Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "desktop.py"
+      - ".github/workflows/build-exe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pywebview pyinstaller
+
+      - name: Build executable
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name wintercc --collect-all webview desktop.py
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/wintercc.exe")) {
+            throw "EXE build failed"
+          }
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wintercc-windows
+          path: dist/wintercc.exe
+          if-no-files-found: error
+          retention-days: 30
