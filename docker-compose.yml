@@ -1,0 +1,10 @@
+services:
+  wintercc:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - winter_data:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+volumes:
+  winter_data:
