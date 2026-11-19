@@ -1,3 +1,4 @@
+
 name: Build winter.cc native Windows EXE (review before release)
 
 on:
@@ -8,6 +9,7 @@ on:
         required: false
         type: boolean
         default: false
+
   push:
     branches: [main]
     paths:
@@ -22,20 +24,23 @@ jobs:
   build-windows:
     name: Build transparent WinForms WebView2 app
     runs-on: windows-latest
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
       - name: Publish self-contained Windows EXE
         shell: pwsh
         run: |
-          dotnet publish desktop/WinterCC.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -p:DebugType=None -p:DebugSymbols=false -o dist
-          if (!(Test-Path 'dist/WinterCC.exe')) { throw 'Windows EXE build failed' }
-          Copy-Item 'dist/WinterCC.exe' 'dist/wintercc.exe' -Force
+          dotnet publish desktop/WinterCC.csproj -c Release -r win-x64 --self-contained true -p:AssemblyName=wintercc -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -p:DebugType=None -p:DebugSymbols=false -o dist
+          if (!(Test-Path 'dist/wintercc.exe')) { throw 'Windows EXE build failed' }
           Get-FileHash 'dist/wintercc.exe' -Algorithm SHA256 | Format-List
+
       - name: Upload EXE for testing and security review
         uses: actions/upload-artifact@v4
         with:
@@ -43,6 +48,7 @@ jobs:
           path: dist/wintercc.exe
           if-no-files-found: error
           retention-days: 30
+
       - name: Publish verified build to GitHub Releases
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
         uses: softprops/action-gh-release@v2
