@@ -54,7 +54,7 @@ const MINECRAFT_BATCH_SIZE = 10;
 const ROBLOX_BATCH_SIZE = 5;
 const DISCORD_BATCH_SIZE = 1;
 const DISCORD_DELAY_MS = 900;
-const MAX_AUTO_RESUMES = 2;
+const MAX_AUTO_RESUMES = 0;
 
 const RATE_LIMIT_REASONS = new Set([
   'discord_rate_limited',
