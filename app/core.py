@@ -1,4 +1,22 @@
 
+from contextlib import contextmanager
+from pathlib import Path
+import os
+import sqlite3
+
+DB = os.getenv("WINTER_DB", "/data/winter.db")
+
+@contextmanager
+def db():
+    Path(DB).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB, timeout=20)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
 def init():
     with db() as c:
         c.executescript("""
