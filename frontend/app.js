@@ -1,7 +1,7 @@
 
-/* winter.cc Frontend V7.4
-   Provider-aware queues, cooldowns, automatic resume,
-   live results tabs, and existing website features.
+/* winter.cc Frontend V7.2
+   Live availability tabs + Discord Auto Check.
+   No automatic cooldown countdown or auto-retry loop.
 */
 
 const $ = id => document.getElementById(id);
@@ -50,32 +50,15 @@ const chars = [
 ];
 
 const DEFAULT_BATCH_SIZE = 25;
-const MINECRAFT_BATCH_SIZE = 10;
-const ROBLOX_BATCH_SIZE = 5;
 const DISCORD_BATCH_SIZE = 1;
 const DISCORD_DELAY_MS = 900;
-const MAX_AUTO_RESUMES = 0;
 
-const RATE_LIMIT_REASONS = new Set([
+const DISCORD_PAUSE_REASONS = new Set([
   'discord_rate_limited',
-  'discord_paused',
-  'rate_limited',
-  'minecraft_http_429',
-  'roblox_http_429',
-  'discord_http_429'
-]);
-
-const ACCESS_BLOCK_REASONS = new Set([
   'discord_access_blocked',
-  'pomelo_access_denied'
+  'discord_paused',
+  'discord_batch_limit'
 ]);
-
-let resumeTimer = null;
-let countdownTimer = null;
-
-// =====================================
-// API
-// =====================================
 
 async function api(path, body, method = 'POST') {
   const response = await fetch('/api/' + path, {
@@ -83,13 +66,13 @@ async function api(path, body, method = 'POST') {
     credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
-      ...(token
-        ? { Authorization: 'Bearer ' + token }
-        : {})
+      ...(token ? {
+        Authorization: 'Bearer ' + token
+      } : {})
     },
-    ...(body === undefined
-      ? {}
-      : { body: JSON.stringify(body) })
+    ...(body === undefined ? {} : {
+      body: JSON.stringify(body)
+    })
   });
 
   let data;
@@ -97,16 +80,11 @@ async function api(path, body, method = 'POST') {
   try {
     data = await response.json();
   } catch {
-    throw Error(
-      'Server returned an unexpected response'
-    );
+    throw Error('Server returned an unexpected response');
   }
 
   if (!response.ok) {
-    if (
-      response.status === 401 &&
-      path !== 'login'
-    ) {
+    if (response.status === 401 && path !== 'login') {
       showLogin();
     }
 
@@ -126,8 +104,6 @@ function showLogin() {
   adminUserCache = [];
   selectedAdminMember = null;
   generationVersion++;
-
-  clearResumeTimers();
   checkRun = null;
 
   sessionStorage.removeItem('winter_token');
@@ -150,11 +126,9 @@ function adminNotice(message, kind = 'success') {
 
   box.textContent = message;
   box.className = 'admin-feedback ' +
-    (
-      kind === 'error'
-        ? 'feedback-error'
-        : 'feedback-success'
-    );
+    (kind === 'error'
+      ? 'feedback-error'
+      : 'feedback-success');
 }
 
 function checked(id) {
@@ -252,15 +226,8 @@ function download(ext, content, mime) {
 
   a.click();
 
-  setTimeout(
-    () => URL.revokeObjectURL(url),
-    500
-  );
+  setTimeout(() => URL.revokeObjectURL(url), 500);
 }
-
-// =====================================
-// RESULTS
-// =====================================
 
 function resultCategory(username, pendingSet) {
   const status = statuses[username];
@@ -304,15 +271,11 @@ function sortedNames() {
     case 'az':
       arr.sort();
       break;
-
     case 'za':
       arr.sort().reverse();
       break;
-
     case 'short':
-      arr.sort(
-        (a, b) => a.length - b.length
-      );
+      arr.sort((a, b) => a.length - b.length);
       break;
   }
 
@@ -346,7 +309,6 @@ function installResultTabs() {
   if ($('winter-result-tabs')) return;
 
   const tabs = document.createElement('div');
-
   tabs.id = 'winter-result-tabs';
   tabs.setAttribute('role', 'tablist');
   tabs.setAttribute(
@@ -360,7 +322,6 @@ function installResultTabs() {
     button.type = 'button';
     button.className = 'winter-result-tab';
     button.dataset.category = key;
-
     button.setAttribute('role', 'tab');
     button.setAttribute(
       'aria-controls',
@@ -399,8 +360,7 @@ function updateResultTabs() {
     const active = resultTab === key;
 
     button.textContent =
-      label +
-      ' (' +
+      label + ' (' +
       tally[key].toLocaleString() +
       ')';
 
@@ -413,6 +373,8 @@ function updateResultTabs() {
       'aria-selected',
       String(active)
     );
+
+    button.tabIndex = 0;
   }
 }
 
@@ -437,28 +399,16 @@ function friendlyReason(reason) {
       'Discord reports this username is taken',
 
     discord_rate_limited:
-      'Discord rate limit reached; waiting for cooldown',
+      'Discord rate limit reached. Try Resume later',
 
     discord_access_blocked:
-      'Discord denied this server request',
+      'Discord denied this server request. Try later',
 
     discord_paused:
-      'Checking paused after Discord rate limit',
+      'Checking paused after a Discord limit',
 
     discord_batch_limit:
-      'Discord batch limit reached',
-
-    rate_limited:
-      'Provider rate limit; waiting for cooldown',
-
-    minecraft_http_429:
-      'Minecraft rate limit; waiting for cooldown',
-
-    roblox_http_429:
-      'Roblox rate limit; waiting for cooldown',
-
-    discord_http_429:
-      'Discord rate limit; waiting for cooldown',
+      'Batch limit; try Resume',
 
     discord_unexpected_response:
       'Discord returned an unexpected response',
@@ -485,30 +435,39 @@ function friendlyReason(reason) {
       'Previously saved result',
 
     no_existing_profile:
-      'No existing Minecraft profile; availability unconfirmed',
+      'No existing profile; availability unconfirmed',
 
     format_valid_but_availability_unverified:
-      'Username format valid; availability not verified',
+      'Valid format; availability not verified',
 
     roblox_signup_validation:
       'Roblox signup validation result',
 
     existing_profile:
-      'Existing Minecraft profile found',
+      'Existing profile found',
 
     not_checked:
-      'Not checked by provider'
+      'Not checked by provider',
+
+    pomelo_timeout:
+      'Pomelo did not respond in time'
   };
 
-  return (
-    labels[reason] ||
-    reason.replaceAll('_', ' ')
-  );
-}
+  if (reason.startsWith('discord_http_')) {
+    return 'Discord request returned HTTP ' +
+      reason.slice('discord_http_'.length);
+  }
 
-// =====================================
-// STYLES
-// =====================================
+  if (
+    reason.startsWith('discord_') &&
+    reason.includes('invalid')
+  ) {
+    return reason.replaceAll('_', ' ');
+  }
+
+  return labels[reason] ||
+    reason.replaceAll('_', ' ');
+}
 
 function installStyles() {
   if (document.getElementById('winter-v6-style')) {
@@ -519,12 +478,12 @@ function installStyles() {
   style.id = 'winter-v6-style';
 
   style.textContent = `
-    @keyframes winterRainbow {
+    @keyframes winterV6Rainbow {
       from { background-position: 0% 50%; }
       to { background-position: 200% 50%; }
     }
 
-    @keyframes winterGlow {
+    @keyframes winterV6Glow {
       0%, 100% {
         filter: drop-shadow(0 0 3px #ff3b8d);
       }
@@ -553,12 +512,12 @@ function installStyles() {
       -webkit-text-fill-color: transparent;
       font-weight: 900;
       animation:
-        winterRainbow 2.4s linear infinite,
-        winterGlow 3s ease-in-out infinite;
+        winterV6Rainbow 2.4s linear infinite,
+        winterV6Glow 3s ease-in-out infinite;
     }
 
     #resultList .winter-available-row {
-      border-color: rgba(177,90,255,.32) !important;
+      border-color: rgba(177, 90, 255, .32) !important;
     }
 
     #resultList .winter-available-row .status {
@@ -590,10 +549,7 @@ function installStyles() {
       height: 100%;
       width: 0%;
       background: linear-gradient(
-        90deg,
-        #893aff,
-        #dc4cff,
-        #00dfff
+        90deg,#893aff,#dc4cff,#00dfff
       );
       transition: width .3s;
     }
@@ -617,6 +573,7 @@ function installStyles() {
       max-width: 100%;
       padding: 8px 0 14px;
       -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
     }
 
     #winter-result-tabs .winter-result-tab {
@@ -630,16 +587,21 @@ function installStyles() {
       background: rgba(120,80,160,.10);
       color: inherit;
       font-weight: 600;
+      line-height: 1.25;
     }
 
-    #winter-result-tabs .winter-active-tab {
+    #winter-result-tabs .winter-result-tab.winter-active-tab {
       background: linear-gradient(
-        100deg,
-        #6030b5,
-        #843dd0
-      ) !important;
-      color: white !important;
-      border-color: #b18afe !important;
+        100deg,#6030b5,#843dd0
+      );
+      color: white;
+      border-color: #b18afe;
+      box-shadow: 0 0 0 1px rgba(177,138,254,.18);
+    }
+
+    #winter-result-tabs .winter-result-tab:focus-visible {
+      outline: 2px solid #a988ff;
+      outline-offset: 2px;
     }
 
     #resultList .winter-pending-status {
@@ -656,10 +618,6 @@ function installStyles() {
 
   document.head.append(style);
 }
-
-// =====================================
-// RENDER RESULTS
-// =====================================
 
 function render() {
   updateResultTabs();
@@ -721,6 +679,7 @@ function render() {
 
     const open = document.createElement('a');
     open.textContent = '↗';
+    open.title = 'Open platform/profile';
     open.href = link($('platform').value, n);
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
@@ -762,8 +721,7 @@ function render() {
 
           statuses[n] = select.value;
           sources[n] = 'manual';
-          checkReasons[n] =
-            'Manually marked by user';
+          checkReasons[n] = 'Manually marked by user';
 
           saveCurrentResults();
           render();
@@ -795,6 +753,7 @@ function render() {
             : ''
         );
 
+      detail.title = checkReasons[n];
       row.append(detail);
     }
 
@@ -812,22 +771,16 @@ function render() {
   if (filtered.length > 500) {
     const p = document.createElement('p');
     p.className = 'muted';
-
     p.textContent =
       'Showing first 500 of ' +
-      filtered.length +
-      ' matching usernames.';
-
+      filtered.length.toLocaleString() +
+      ' matching usernames. Copy and export include all matching names.';
     list.append(p);
   }
 
   $('generatedStat').textContent =
     names.length.toLocaleString();
 }
-
-// =====================================
-// FAVORITES
-// =====================================
 
 async function loadFavorites() {
   const favorites = await api('favorites');
@@ -871,10 +824,6 @@ async function loadFavorites() {
   }
 }
 
-// =====================================
-// HISTORY
-// =====================================
-
 async function loadHistory() {
   const history = await api('history');
 
@@ -898,10 +847,6 @@ async function loadHistory() {
   }
 }
 
-// =====================================
-// PRESETS
-// =====================================
-
 async function loadPresets() {
   const presets = await api('presets');
 
@@ -910,7 +855,6 @@ async function loadPresets() {
 
   for (const p of presets) {
     const button = document.createElement('button');
-
     button.className = 'secondary';
     button.textContent = p.name;
 
@@ -948,17 +892,12 @@ async function loadPresets() {
 
       resetChecks();
       render();
-
       notice('Preset loaded');
     };
 
     box.append(button);
   }
 }
-
-// =====================================
-// OWNER DASHBOARD
-// =====================================
 
 function formatDate(value) {
   if (!value) return 'Never';
@@ -1020,12 +959,12 @@ function licenseRow(license) {
 
   info.textContent =
     '#' + license.id +
-    ' · ' +
-    (license.username || 'Member') +
+    ' · ' + (license.username || 'Member') +
     ' · Expires: ' +
     formatDate(license.expires_at);
 
   const status = licenseStatus(license);
+
   const badge = document.createElement('strong');
 
   badge.className =
@@ -1175,9 +1114,7 @@ function renderAdminUsers() {
             ? 'tiny success-button'
             : 'tiny danger-button',
           async () => {
-            const suspend = !Boolean(
-              user.suspended
-            );
+            const suspend = !Boolean(user.suspended);
 
             if (
               !confirm(
@@ -1225,7 +1162,7 @@ function renderAdminUsers() {
               !confirm(
                 'Reset password for ' +
                 user.username +
-                '?'
+                '? Their existing sessions will be signed out.'
               )
             ) {
               return;
@@ -1252,7 +1189,8 @@ function renderAdminUsers() {
               !confirm(
                 'Permanently delete "' +
                 user.username +
-                '"?'
+                '"?\n\n' +
+                'This removes their account, licenses, favorites, history, and saved data.'
               )
             ) {
               return;
@@ -1264,9 +1202,7 @@ function renderAdminUsers() {
               'DELETE'
             );
 
-            if (
-              selectedAdminMember === user.id
-            ) {
+            if (selectedAdminMember === user.id) {
               selectedAdminMember = null;
               $('adminMemberDetails').hidden = true;
             }
@@ -1479,12 +1415,7 @@ async function loadAdmin() {
   }
 }
 
-// =====================================
-// OWNER DASHBOARD EVENTS
-// =====================================
-
-$('adminUserSearch').oninput =
-  renderAdminUsers;
+$('adminUserSearch').oninput = renderAdminUsers;
 
 $('adminActivityLimit').onchange = async () => {
   try {
@@ -1563,7 +1494,8 @@ $('createLicenseForm').onsubmit = async e => {
   button.disabled = true;
 
   try {
-    const expiry = $('licenseExpiry').value;
+    const expiry =
+      $('licenseExpiry').value;
 
     const result = await api(
       'admin/users/' +
@@ -1599,6 +1531,7 @@ $('copyLicense').onclick = async () => {
     await navigator.clipboard.writeText(
       $('newLicenseKey').value
     );
+
     adminNotice('License key copied!');
   } catch {
     adminNotice(
@@ -1616,10 +1549,6 @@ $('refreshAdmin').onclick = async () => {
     adminNotice(e.message, 'error');
   }
 };
-
-// =====================================
-// AUTO CHECK TOGGLE
-// =====================================
 
 function installAutoCheckToggle() {
   if ($('autoCheck')) return;
@@ -1657,8 +1586,9 @@ function installAutoCheckToggle() {
   const description = document.createElement('small');
 
   title.textContent = 'Auto Check';
+
   description.textContent =
-    'Check automatically where supported';
+    'Validate usernames after generating; availability is confirmed only where supported';
 
   Object.assign(description.style, {
     display: 'block',
@@ -1674,10 +1604,6 @@ function installAutoCheckToggle() {
     button
   );
 }
-
-// =====================================
-// PROGRESS
-// =====================================
 
 function installProgress() {
   if ($('winter-v6-progress')) return;
@@ -1695,7 +1621,6 @@ function installProgress() {
 
   const fill = document.createElement('div');
   fill.id = 'winter-v6-fill';
-
   track.append(fill);
 
   const resume = document.createElement('button');
@@ -1703,37 +1628,13 @@ function installProgress() {
   resume.id = 'winter-v6-resume';
   resume.type = 'button';
   resume.className = 'secondary';
-  resume.textContent =
-    'Resume unfinished checks';
+  resume.textContent = 'Resume unfinished checks';
   resume.hidden = true;
 
-  resume.onclick = () => {
-    if (!checkRun) return;
-
-    const wait = Math.ceil(
-      ((checkRun.resumeAt || 0) - Date.now()) / 1000
-    );
-
-    if (wait > 0) {
-      notice(
-        'Provider cooldown: ' +
-        wait +
-        ' seconds remaining.'
-      );
-      return;
-    }
-
-    checkRun.autoResumes = 0;
-    checkRun.resumeAt = 0;
-
-    saveCheckRun();
-
+  resume.onclick = () =>
     runChecks().catch(
-      e => notice(
-        'Resume error: ' + e.message
-      )
+      e => notice('Resume error: ' + e.message)
     );
-  };
 
   box.append(label, track, resume);
 
@@ -1744,7 +1645,8 @@ function installProgress() {
 }
 
 function progress(processed, total, label) {
-  $('winter-v6-progress').hidden = false;
+  const box = $('winter-v6-progress');
+  box.hidden = false;
 
   const percent = total
     ? Math.round(processed / total * 100)
@@ -1788,161 +1690,6 @@ function sleep(ms) {
     resolve => setTimeout(resolve, ms)
   );
 }
-
-// =====================================
-// RATE-LIMIT COOLDOWNS
-// =====================================
-
-function clearResumeTimers() {
-  if (resumeTimer !== null) {
-    clearTimeout(resumeTimer);
-  }
-
-  if (countdownTimer !== null) {
-    clearTimeout(countdownTimer);
-  }
-
-  resumeTimer = null;
-  countdownTimer = null;
-}
-
-function rateLimited(reason) {
-  return RATE_LIMIT_REASONS.has(reason);
-}
-
-function accessBlocked(reason) {
-  return ACCESS_BLOCK_REASONS.has(reason);
-}
-
-function retryDelay(run, item) {
-  const failures = Math.min(
-    Number(run.cooldowns || 0) + 1,
-    6
-  );
-
-  const base =
-    run.platform === 'Discord'
-      ? 90000
-      : 45000;
-
-  const hinted = Number(
-    item && item.retry_after
-  );
-
-  const providerMs =
-    Number.isFinite(hinted) && hinted > 0
-      ? Math.min(
-          hinted * 1000 + 1000,
-          3600000
-        )
-      : 0;
-
-  return Math.max(
-    providerMs,
-    Math.min(
-      base * (2 ** (failures - 1)),
-      900000
-    )
-  );
-}
-
-function scheduleResume() {
-  clearResumeTimers();
-
-  if (
-    !checkRun ||
-    !checkRun.pending.length ||
-    !checkRun.resumeAt
-  ) {
-    return;
-  }
-
-  const version = generationVersion;
-  const runId = checkRun.id;
-
-  function tick() {
-    if (
-      !checkRun ||
-      generationVersion !== version ||
-      checkRun.id !== runId
-    ) {
-      return;
-    }
-
-    const seconds = Math.max(
-      0,
-      Math.ceil(
-        (checkRun.resumeAt - Date.now()) / 1000
-      )
-    );
-
-    const automatic =
-      (checkRun.autoResumes || 0) <
-      MAX_AUTO_RESUMES;
-
-    const label =
-      'Provider cooldown: ' +
-      seconds +
-      's · ' +
-      checkRun.pending.length +
-      ' pending · ' +
-      (
-        automatic
-          ? 'Auto-resume enabled'
-          : 'Manual resume required'
-      );
-
-    const el = $('winter-v6-label');
-
-    if (el) {
-      el.textContent = label;
-    }
-
-    if (seconds > 0) {
-      countdownTimer = setTimeout(
-        tick,
-        1000
-      );
-      return;
-    }
-
-    if (!automatic) {
-      notice(
-        'Cooldown finished. Tap Resume unfinished checks.'
-      );
-      return;
-    }
-
-    if (
-      checkingInProgress ||
-      generatingInProgress
-    ) {
-      resumeTimer = setTimeout(
-        () => scheduleResume(),
-        2000
-      );
-      return;
-    }
-
-    checkRun.autoResumes =
-      (checkRun.autoResumes || 0) + 1;
-
-    checkRun.resumeAt = 0;
-    saveCheckRun();
-
-    runChecks().catch(
-      e => notice(
-        'Auto-resume error: ' + e.message
-      )
-    );
-  }
-
-  tick();
-}
-
-// =====================================
-// RETRIES AND SAVED CHECKS
-// =====================================
 
 function temporary(error) {
   return /failed to fetch|load failed|network|timeout|unexpected response|temporarily unavailable/i
@@ -1990,8 +1737,11 @@ function saveCheckRun() {
         'winter_check_run'
       );
     }
-  } catch (e) {
-    console.warn(e);
+  } catch (error) {
+    console.warn(
+      'Could not save check progress',
+      error
+    );
   }
 }
 
@@ -2002,8 +1752,6 @@ function saveCurrentResults() {
 }
 
 function resetChecks() {
-  clearResumeTimers();
-
   checkRun = null;
   saveCheckRun();
 
@@ -2017,10 +1765,6 @@ function resetChecks() {
 function counts() {
   return resultCounts();
 }
-
-// =====================================
-// RUN CHECKS
-// =====================================
 
 async function runChecks() {
   if (
@@ -2041,44 +1785,22 @@ async function runChecks() {
     throw Error('Platform changed');
   }
 
-  const remainingCooldown = Math.ceil(
-    (
-      (checkRun.resumeAt || 0) -
-      Date.now()
-    ) / 1000
-  );
-
-  if (remainingCooldown > 0) {
-    notice(
-      'Provider cooldown: ' +
-      remainingCooldown +
-      ' seconds remaining.'
-    );
-
-    scheduleResume();
-    return;
-  }
-
   const version = generationVersion;
-  const runId = checkRun.id;
-  const platform = checkRun.platform;
-  const resume = $('winter-v6-resume');
+  const discord =
+    checkRun.platform === 'Discord';
 
-  clearResumeTimers();
+  const resume = $('winter-v6-resume');
 
   checkingInProgress = true;
   updateCheckButtons();
-
   resume.hidden = true;
 
+  let processed = checkRun.done.length;
   let pausedReason = '';
-  let pauseItem = null;
-  let stopForAccess = false;
 
   try {
     while (
       checkRun &&
-      checkRun.id === runId &&
       checkRun.pending.length
     ) {
       if (
@@ -2091,22 +1813,17 @@ async function runChecks() {
         checkRun.done.length +
         checkRun.pending.length;
 
-      const size =
-        platform === 'Discord'
+      const batch = checkRun.pending.slice(
+        0,
+        discord
           ? DISCORD_BATCH_SIZE
-          : platform === 'Minecraft'
-            ? MINECRAFT_BATCH_SIZE
-            : platform === 'Roblox'
-              ? ROBLOX_BATCH_SIZE
-              : DEFAULT_BATCH_SIZE;
-
-      const batch =
-        checkRun.pending.slice(0, size);
+          : DEFAULT_BATCH_SIZE
+      );
 
       progress(
-        checkRun.done.length,
+        processed,
         total,
-        'Checking ' + platform
+        'Checking ' + checkRun.platform
       );
 
       let response;
@@ -2115,7 +1832,7 @@ async function runChecks() {
         response = await requestWithRetry(
           'check/auto',
           {
-            platform,
+            platform: checkRun.platform,
             search_id: checkRun.id,
             usernames: batch
           }
@@ -2125,14 +1842,11 @@ async function runChecks() {
           'Connection interrupted: ' +
           error.message;
 
-        stopForAccess = true;
         break;
       }
 
       if (
-        version !== generationVersion ||
-        !checkRun ||
-        checkRun.id !== runId
+        version !== generationVersion
       ) {
         return;
       }
@@ -2156,7 +1870,7 @@ async function runChecks() {
           )
       );
 
-      const completed = new Set();
+      let consumed = 0;
 
       for (const name of batch) {
         const item = returned.get(
@@ -2167,14 +1881,8 @@ async function runChecks() {
           pausedReason =
             'Server response was incomplete';
 
-          stopForAccess = true;
           break;
         }
-
-        const reason =
-          typeof item.reason === 'string'
-            ? item.reason
-            : 'no_reason_returned';
 
         const status =
           [
@@ -2187,23 +1895,22 @@ async function runChecks() {
             ? item.status
             : 'unknown';
 
+        const reason =
+          typeof item.reason === 'string'
+            ? item.reason
+            : 'no_reason_returned';
+
         statuses[name] = status;
         checkReasons[name] = reason;
 
-        if (rateLimited(reason)) {
-          pauseItem = item;
-          pausedReason = friendlyReason(reason);
+        if (
+          discord &&
+          DISCORD_PAUSE_REASONS.has(reason)
+        ) {
+          pausedReason =
+            friendlyReason(reason);
 
-          // Rate-limited names stay Pending.
-          continue;
-        }
-
-        if (accessBlocked(reason)) {
-          stopForAccess = true;
-          pausedReason = friendlyReason(reason);
-
-          // Access-denied names need manual retry.
-          continue;
+          break;
         }
 
         if (
@@ -2213,123 +1920,77 @@ async function runChecks() {
           sources[name] = 'automatic';
         }
 
-        completed.add(name);
-      }
+        checkRun.done.push(name);
+        checkRun.pending.shift();
 
-      // Save results independently.
-      // One rate limit doesn't erase other results.
-
-      if (completed.size) {
-        const doneSet = new Set(
-          checkRun.done
-        );
-
-        for (const name of batch) {
-          if (
-            completed.has(name) &&
-            !doneSet.has(name)
-          ) {
-            checkRun.done.push(name);
-            doneSet.add(name);
-          }
-        }
-
-        checkRun.pending =
-          checkRun.pending.filter(
-            n => !completed.has(n)
-          );
+        processed++;
+        consumed++;
       }
 
       saveCurrentResults();
       render();
 
       progress(
-        checkRun.done.length,
+        processed,
         checkRun.done.length +
         checkRun.pending.length,
-        'Checking ' + platform
+        'Checking ' + checkRun.platform
       );
 
+      if (pausedReason) {
+        break;
+      }
+
       if (
-        pauseItem ||
-        stopForAccess
+        consumed < batch.length
       ) {
-        break;
-      }
-
-      if (!completed.size) {
         pausedReason =
-          'No completed results returned';
+          'Incomplete response';
 
-        stopForAccess = true;
         break;
       }
 
       if (
-        platform === 'Discord' &&
+        discord &&
         checkRun.pending.length
       ) {
-        await sleep(DISCORD_DELAY_MS);
+        await sleep(
+          DISCORD_DELAY_MS
+        );
       }
     }
 
     if (
-      version !== generationVersion ||
-      !checkRun ||
-      checkRun.id !== runId
+      version !== generationVersion
     ) {
       return;
     }
 
     try {
       await loadHistory();
-    } catch (e) {
-      console.warn(e);
+    } catch (error) {
+      console.warn(error);
     }
 
     const tally = counts();
 
-    if (pauseItem) {
-      checkRun.cooldowns =
-        (checkRun.cooldowns || 0) + 1;
-
-      checkRun.resumeAt =
-        Date.now() +
-        retryDelay(
-          {
-            ...checkRun,
-            cooldowns:
-              checkRun.cooldowns - 1
-          },
-          pauseItem
-        );
-
-      saveCheckRun();
-    } else {
-      checkRun.resumeAt = 0;
-      saveCheckRun();
-    }
-
     const remaining =
-      checkRun.pending.length;
+      checkRun
+        ? checkRun.pending.length
+        : 0;
 
     const intro = remaining
       ? (
         'Check paused. ' +
         remaining +
-        ' pending. ' +
-        (pausedReason ? pausedReason + '. ' : '')
+        ' remaining. ' +
+        (
+          pausedReason
+            ? pausedReason + '. '
+            : ''
+        )
       )
       : 'Check finished. ';
-
-    const validationOnly =
-      [
-        'Instagram',
-        'TikTok',
-        'Telegram'
-      ].includes(platform)
-        ? ' This platform currently supports format validation only.'
-        : '';
 
     notice(
       intro +
@@ -2338,39 +1999,21 @@ async function runChecks() {
       ' · Invalid: ' + tally.invalid +
       ' · Unknown: ' + tally.unknown +
       ' · Pending: ' + tally.pending +
-      '.' +
-      validationOnly
+      '. Use the Results tabs to filter.'
     );
 
     resume.hidden = !remaining;
 
     if (!remaining) {
-      clearResumeTimers();
-
       checkRun = null;
       saveCheckRun();
     }
-
   } finally {
     checkingInProgress = false;
-
     updateCheckButtons();
     render();
-
-    if (
-      checkRun &&
-      checkRun.pending.length &&
-      pauseItem &&
-      !stopForAccess
-    ) {
-      scheduleResume();
-    }
   }
 }
-
-// =====================================
-// CREATE A NEW CHECK
-// =====================================
 
 async function beginChecks() {
   if (
@@ -2381,13 +2024,16 @@ async function beginChecks() {
   }
 
   if (!names.length) {
-    throw Error('Generate usernames first');
+    throw Error(
+      'Generate usernames first'
+    );
   }
 
   if (
     checkRun &&
     checkRun.pending.length &&
-    checkRun.platform === $('platform').value
+    checkRun.platform ===
+      $('platform').value
   ) {
     await runChecks();
     return;
@@ -2419,7 +2065,10 @@ async function beginChecks() {
 
   statuses = Object.fromEntries(
     data.results.map(
-      x => [x.username, x.status]
+      x => [
+        x.username,
+        x.status
+      ]
     )
   );
 
@@ -2438,17 +2087,7 @@ async function beginChecks() {
         x => x.username
       ),
 
-    done: data.results
-      .filter(
-        x => x.status !== 'unknown'
-      )
-      .map(
-        x => x.username
-      ),
-
-    cooldowns: 0,
-    autoResumes: 0,
-    resumeAt: 0,
+    done: [],
 
     statuses: { ...statuses },
     reasons: {},
@@ -2478,15 +2117,12 @@ async function beginChecks() {
   await runChecks();
 }
 
-// =====================================
-// APP INITIALIZATION
-// =====================================
-
 async function start() {
   try {
     const me = await api('me');
 
-    $('who').textContent = me.username;
+    $('who').textContent =
+      me.username;
 
     isAdmin = Boolean(me.is_admin);
 
@@ -2496,18 +2132,24 @@ async function start() {
     platforms = await api('platforms');
 
     $('platform').replaceChildren(
-      ...Object.keys(platforms).map(name => {
-        const option =
-          document.createElement('option');
+      ...Object.keys(platforms).map(
+        name => {
+          const option =
+            document.createElement('option');
 
-        option.value = name;
-        option.textContent = name;
+          option.value = name;
+          option.textContent = name;
 
-        return option;
-      })
+          return option;
+        }
+      )
     );
 
-    updateLengths(['3', '4', '5']);
+    updateLengths([
+      '3',
+      '4',
+      '5'
+    ]);
 
     checkboxes(
       'types',
@@ -2547,9 +2189,14 @@ async function start() {
         Array.isArray(saved.pending) &&
         Array.isArray(saved.done)
       ) {
-        $('platform').value = saved.platform;
+        $('platform').value =
+          saved.platform;
 
-        updateLengths(['3', '4', '5']);
+        updateLengths([
+          '3',
+          '4',
+          '5'
+        ]);
 
         checkRun = saved;
         searchId = saved.id;
@@ -2565,7 +2212,12 @@ async function start() {
               n => [n, 'unknown']
             )
           ),
-          ...(saved.statuses || {})
+
+          ...(
+            saved.statuses ||
+            saved.snapshot ||
+            {}
+          )
         };
 
         sources = {
@@ -2586,13 +2238,6 @@ async function start() {
         );
 
         render();
-
-        if (
-          saved.resumeAt &&
-          saved.pending.length
-        ) {
-          scheduleResume();
-        }
       }
     } catch (e) {
       console.warn(
@@ -2605,9 +2250,12 @@ async function start() {
       loadFavorites(),
       loadHistory(),
       loadPresets(),
-      ...(isAdmin ? [loadAdmin()] : [])
+      ...(
+        isAdmin
+          ? [loadAdmin()]
+          : []
+      )
     ]);
-
   } catch (e) {
     console.error(
       'Initialization failed:',
@@ -2618,17 +2266,16 @@ async function start() {
   }
 }
 
-// =====================================
-// LOGIN / LOGOUT
-// =====================================
-
 $('loginForm').onsubmit = async e => {
   e.preventDefault();
 
   const button = $('loginForm')
-    .querySelector('button[type="submit"]');
+    .querySelector(
+      'button[type="submit"]'
+    );
 
   button.disabled = true;
+
   $('loginError').textContent = '';
 
   try {
@@ -2670,9 +2317,9 @@ $('loginForm').onsubmit = async e => {
     $('key').value = '';
 
     await start();
-
   } catch (e) {
-    $('loginError').textContent = e.message;
+    $('loginError').textContent =
+      e.message;
   } finally {
     button.disabled = false;
   }
@@ -2680,7 +2327,10 @@ $('loginForm').onsubmit = async e => {
 
 $('logout').onclick = async () => {
   try {
-    await api('logout', {});
+    await api(
+      'logout',
+      {}
+    );
   } catch (e) {
     console.error(e);
   }
@@ -2688,10 +2338,6 @@ $('logout').onclick = async () => {
   resetChecks();
   showLogin();
 };
-
-// =====================================
-// PLATFORM CHANGES
-// =====================================
 
 $('platform').onchange = () => {
   if (
@@ -2710,7 +2356,11 @@ $('platform').onchange = () => {
 
   resetChecks();
 
-  updateLengths(['3', '4', '5']);
+  updateLengths([
+    '3',
+    '4',
+    '5'
+  ]);
 
   $('checkedStat').textContent = '0';
 
@@ -2721,10 +2371,6 @@ $('platform').onchange = () => {
   );
 };
 
-// =====================================
-// GENERATE
-// =====================================
-
 $('generateBtn').onclick = async () => {
   if (
     generatingInProgress ||
@@ -2734,6 +2380,7 @@ $('generateBtn').onclick = async () => {
   }
 
   generatingInProgress = true;
+
   updateCheckButtons();
 
   let shouldAuto = false;
@@ -2758,6 +2405,7 @@ $('generateBtn').onclick = async () => {
     resetChecks();
 
     $('checkedStat').textContent = '0';
+
     render();
 
     notice(
@@ -2776,13 +2424,13 @@ $('generateBtn').onclick = async () => {
       $('autoCheck')?.checked &&
       names.length
     );
-
   } catch (e) {
     notice(
       'Error: ' + e.message
     );
   } finally {
     generatingInProgress = false;
+
     updateCheckButtons();
   }
 
@@ -2806,10 +2454,6 @@ $('checkBtn').onclick = async () => {
     );
   }
 };
-
-// =====================================
-// PRESETS
-// =====================================
 
 $('savePreset').onclick = async () => {
   const name = prompt(
@@ -2836,10 +2480,6 @@ $('savePreset').onclick = async () => {
     notice(e.message);
   }
 };
-
-// =====================================
-// FILTERING AND EXPORTS
-// =====================================
 
 $('filter').oninput = render;
 $('sort').onchange = render;
@@ -2882,6 +2522,7 @@ $('txt').onclick = () => {
 $('csv').onclick = () => {
   download(
     'csv',
+
     'username,status,platform\n' +
     sortedNames()
       .map(n =>
@@ -2898,6 +2539,7 @@ $('csv').onclick = () => {
           .join(',')
       )
       .join('\n'),
+
     'text/csv'
   );
 };
@@ -2905,24 +2547,25 @@ $('csv').onclick = () => {
 $('json').onclick = () => {
   download(
     'json',
+
     JSON.stringify(
-      sortedNames().map(n => ({
-        username: n,
-        status:
-          statuses[n] || 'not checked',
-        platform:
-          $('platform').value
-      })),
+      sortedNames().map(
+        n => ({
+          username: n,
+          status:
+            statuses[n] ||
+            'not checked',
+          platform:
+            $('platform').value
+        })
+      ),
       null,
       2
     ),
+
     'application/json'
   );
 };
-
-// =====================================
-// WORDLIST
-// =====================================
 
 $('wordlist').onchange = async e => {
   const file = e.target.files[0];
@@ -2951,27 +2594,6 @@ $('wordlist').onchange = async e => {
   );
 };
 
-// =====================================
-// RESUME WHEN PAGE BECOMES ACTIVE
-// =====================================
-
-document.addEventListener(
-  'visibilitychange',
-  () => {
-    if (
-      !document.hidden &&
-      checkRun &&
-      checkRun.resumeAt
-    ) {
-      scheduleResume();
-    }
-  }
-);
-
-// =====================================
-// KEYBOARD SHORTCUT
-// =====================================
-
 document.addEventListener(
   'keydown',
   e => {
@@ -2981,13 +2603,10 @@ document.addEventListener(
       !$('app').hidden
     ) {
       e.preventDefault();
+
       $('generateBtn').click();
     }
   }
 );
-
-// =====================================
-// START WINTER.CC
-// =====================================
 
 start();
