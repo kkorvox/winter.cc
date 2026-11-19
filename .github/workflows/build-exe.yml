@@ -1,48 +1,58 @@
-"""winter.cc Windows desktop app.
+name: Build and publish winter.cc Windows EXE
 
-This is a native WebView2 window showing the *live* winter.cc site.
-It uses the same server, frontend, login, and result handling as the web app.
-Requires Internet access and the Microsoft Edge WebView2 Runtime.
-"""
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop.py'
+      - '.github/workflows/build-exe.yml'
 
-import os
-from pathlib import Path
+permissions:
+  contents: write
 
-import webview
+jobs:
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-SITE_URL = "https://winter-cc.onrender.com/"
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pywebview>=5.0,<7" "pyinstaller>=6,<7"
 
+      - name: Build app
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name wintercc --collect-all webview --hidden-import clr desktop.py
+          if (!(Test-Path 'dist/wintercc.exe')) { throw 'EXE build failed' }
 
-def main():
-    # Cookies persist so the website's Remember Me option works.
-    storage_base = Path(
-        os.environ.get("LOCALAPPDATA", str(Path.home()))
-    ) / "winter.cc" / "WebView2"
-    storage_base.mkdir(parents=True, exist_ok=True)
+      - name: Save build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wintercc-windows-v7.7
+          path: dist/wintercc.exe
+          if-no-files-found: error
+          retention-days: 30
 
-    # Match the site's download/export and external profile links.
-    webview.settings["ALLOW_DOWNLOADS"] = True
-    webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
-
-    webview.create_window(
-        title="winter.cc",
-        url=SITE_URL,
-        width=1250,
-        height=820,
-        min_size=(740, 540),
-        resizable=True,
-        background_color="#120b20",
-        text_select=True,
-    )
-
-    webview.start(
-        gui="edgechromium",
-        private_mode=False,
-        storage_path=str(storage_base),
-        debug=False,
-    )
-
-
-if __name__ == "__main__":
-    main()
+      - name: Publish or update latest Windows release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v7.7
+          name: winter.cc Desktop v7.7
+          body: |
+            Windows app powered by the same live winter.cc website.
+            Requires Internet and Microsoft Edge WebView2 Runtime.
+            Open the EXE and log in using your normal winter.cc account.
+          files: dist/wintercc.exe
+          make_latest: true
+          overwrite_files: true
