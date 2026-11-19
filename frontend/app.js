@@ -9,6 +9,7 @@ let wordlist = null;
 let platforms = {};
 let isAdmin = false;
 let adminUserCache = [];
+let selectedAdminMember = null;
 
 const types = [
   'Random letters', 'Letters + numbers',
@@ -61,6 +62,7 @@ function showLogin() {
   token = '';
   isAdmin = false;
   adminUserCache = [];
+  selectedAdminMember = null;
 
   sessionStorage.removeItem('winter_token');
 
@@ -336,7 +338,7 @@ async function loadHistory() {
       '#' + s.id +
       ' · ' + s.platform +
       ' · ' +
-      s.created.slice(0, 19).replace('T', ' ') +
+      String(s.created || '').slice(0, 19).replace('T', ' ') +
       ' · ' + s.results.length + ' shown';
 
     box.append(row);
@@ -371,17 +373,8 @@ async function loadPresets() {
         (c.lengths || []).map(String)
       );
 
-      checkboxes(
-        'types',
-        types,
-        c.types || []
-      );
-
-      checkboxes(
-        'characters',
-        chars,
-        c.characters || []
-      );
+      checkboxes('types', types, c.types || []);
+      checkboxes('characters', chars, c.characters || []);
 
       notice('Preset loaded');
     };
@@ -390,7 +383,153 @@ async function loadPresets() {
   }
 }
 
-// OWNER DASHBOARD V2
+// OWNER DASHBOARD V3
+
+function formatDate(value) {
+  if (!value) return 'Never';
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString();
+}
+
+function makeButton(label, className, action) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = className;
+  button.textContent = label;
+
+  button.onclick = async () => {
+    button.disabled = true;
+
+    try {
+      await action();
+    } catch (e) {
+      adminNotice(e.message, 'error');
+    } finally {
+      button.disabled = false;
+    }
+  };
+
+  return button;
+}
+
+function makeEmpty(message) {
+  const p = document.createElement('p');
+  p.className = 'muted';
+  p.textContent = message;
+  return p;
+}
+
+function licenseStatus(license) {
+  if (license.revoked) return 'Revoked';
+
+  if (
+    license.expires_at &&
+    new Date(license.expires_at).getTime() <= Date.now()
+  ) {
+    return 'Expired';
+  }
+
+  return 'Active';
+}
+
+function licenseRow(license) {
+  const row = document.createElement('div');
+  row.className = 'result';
+
+  const info = document.createElement('span');
+  info.textContent =
+    '#' + license.id +
+    ' · ' + (license.username || 'Member') +
+    ' · Expires: ' + formatDate(license.expires_at);
+
+  const status = licenseStatus(license);
+
+  const badge = document.createElement('strong');
+  badge.className =
+    'license-status ' +
+    (status === 'Active'
+      ? 'status-active'
+      : status === 'Revoked'
+        ? 'status-revoked'
+        : 'status-expired');
+  badge.textContent = status;
+
+  row.append(info, badge);
+
+  if (!license.revoked) {
+    row.append(
+      makeButton('Renew', 'tiny secondary', async () => {
+        const entered = prompt(
+          'New expiration date (YYYY-MM-DD).\n' +
+          'Leave blank for no expiration:',
+          license.expires_at
+            ? license.expires_at.slice(0, 10)
+            : ''
+        );
+
+        if (entered === null) return;
+
+        let expiresAt = null;
+
+        if (entered.trim()) {
+          const date = new Date(
+            entered.trim() + 'T23:59:59'
+          );
+
+          if (Number.isNaN(date.getTime())) {
+            throw Error('Invalid expiration date');
+          }
+
+          expiresAt = date.toISOString();
+        }
+
+        const result = await api(
+          'admin/licenses/' + license.id + '/renew',
+          { expires_at: expiresAt }
+        );
+
+        await loadAdmin();
+        adminNotice(result.message);
+      })
+    );
+  }
+
+  row.append(
+    makeButton(
+      license.revoked ? 'Reactivate' : 'Revoke',
+      license.revoked
+        ? 'tiny success-button'
+        : 'tiny danger-button',
+      async () => {
+        const action = license.revoked
+          ? 'reactivate'
+          : 'revoke';
+
+        if (!confirm(
+          'Are you sure you want to ' +
+          action + ' license #' + license.id + '?'
+        )) return;
+
+        const result = await api(
+          'admin/licenses/' +
+          license.id + '/' + action,
+          {}
+        );
+
+        await loadAdmin();
+        adminNotice(result.message);
+      }
+    )
+  );
+
+  return row;
+}
 
 function renderAdminUsers() {
   const box = $('adminUsers');
@@ -404,10 +543,7 @@ function renderAdminUsers() {
   );
 
   if (!users.length) {
-    const empty = document.createElement('p');
-    empty.className = 'muted';
-    empty.textContent = 'No matching members found.';
-    box.append(empty);
+    box.append(makeEmpty('No matching members found.'));
     return;
   }
 
@@ -416,61 +552,223 @@ function renderAdminUsers() {
     row.className = 'result';
 
     const info = document.createElement('span');
-
     info.textContent =
       '#' + user.id +
       ' · ' + user.username +
-      (user.is_admin
-        ? ' · Owner'
-        : ' · Member');
+      (user.is_admin ? ' · Owner' : ' · Member') +
+      (user.suspended ? ' · Suspended' : '') +
+      ' · Logins: ' + (user.login_count || 0);
 
     row.append(info);
 
+    row.append(
+      makeButton('Details', 'tiny secondary', async () => {
+        await showMemberDetails(user.id);
+      })
+    );
+
     if (!user.is_admin) {
-      const button = document.createElement('button');
-      button.className = 'tiny danger-button';
-      button.textContent = 'Delete User';
+      row.append(
+        makeButton(
+          user.suspended ? 'Unsuspend' : 'Suspend',
+          user.suspended
+            ? 'tiny success-button'
+            : 'tiny danger-button',
+          async () => {
+            const suspend = !Boolean(user.suspended);
 
-      button.onclick = async () => {
-        const confirmed = confirm(
-          'Permanently delete "' +
-          user.username +
-          '"?\n\n' +
-          'This removes the account, licenses, ' +
-          'and saved data. ' +
-          'This cannot be undone.'
-        );
+            if (!confirm(
+              (suspend ? 'Suspend ' : 'Unsuspend ') +
+              user.username + '?'
+            )) return;
 
-        if (!confirmed) return;
+            const result = await api(
+              'admin/users/' + user.id + '/suspension',
+              { suspended: suspend }
+            );
 
-        button.disabled = true;
+            await loadAdmin();
+            adminNotice(result.message);
+          }
+        )
+      );
 
-        try {
+      row.append(
+        makeButton('Reset Password', 'tiny secondary', async () => {
+          const password = prompt(
+            'Enter a NEW password for ' +
+            user.username + ' (minimum 12 characters):'
+          );
+
+          if (password === null) return;
+
+          if (password.length < 12) {
+            throw Error(
+              'Password must be at least 12 characters'
+            );
+          }
+
+          if (!confirm(
+            'Reset password for ' + user.username +
+            '? Their existing sessions will be signed out.'
+          )) return;
+
+          const result = await api(
+            'admin/users/' + user.id + '/password',
+            { password }
+          );
+
+          adminNotice(result.message);
+        })
+      );
+
+      row.append(
+        makeButton('Delete User', 'tiny danger-button', async () => {
+          if (!confirm(
+            'Permanently delete "' + user.username +
+            '"?\n\nThis removes their account, licenses, ' +
+            'favorites, history, and saved data.'
+          )) return;
+
           const result = await api(
             'admin/users/' + user.id,
             {},
             'DELETE'
           );
 
+          if (selectedAdminMember === user.id) {
+            selectedAdminMember = null;
+            $('adminMemberDetails').hidden = true;
+          }
+
           $('newLicenseBox').hidden = true;
           $('newLicenseKey').value = '';
 
           await loadAdmin();
-
-          adminNotice(
-            result.message ||
-            'Member successfully deleted!',
-            'success'
-          );
-        } catch (e) {
-          adminNotice(e.message, 'error');
-          button.disabled = false;
-        }
-      };
-
-      row.append(button);
+          adminNotice(result.message);
+        })
+      );
     }
 
+    box.append(row);
+  }
+}
+
+async function showMemberDetails(userId) {
+  const data = await api('admin/users/' + userId);
+
+  selectedAdminMember = userId;
+
+  $('adminMemberDetails').hidden = false;
+  $('adminMemberTitle').textContent =
+    'Member: ' + data.member.username;
+
+  const member = data.member;
+
+  $('adminMemberInfo').replaceChildren();
+
+  const info = document.createElement('p');
+  info.className = 'muted';
+  info.textContent =
+    'Account ID: ' + member.id +
+    ' · Created: ' + formatDate(member.created_at) +
+    ' · Last login: ' + formatDate(member.last_login) +
+    ' · Total logins: ' + member.login_count +
+    ' · Status: ' +
+    (member.suspended ? 'Suspended' : 'Enabled');
+
+  $('adminMemberInfo').append(info);
+
+  const licensesBox = $('adminMemberLicenses');
+  licensesBox.replaceChildren();
+
+  if (!data.licenses.length) {
+    licensesBox.append(makeEmpty('No licenses for this member.'));
+  } else {
+    for (const license of data.licenses) {
+      licensesBox.append(
+        licenseRow({
+          ...license,
+          username: member.username
+        })
+      );
+    }
+  }
+
+  const activityBox = $('adminMemberActivity');
+  activityBox.replaceChildren();
+
+  if (!data.activity.length) {
+    activityBox.append(makeEmpty('No activity recorded yet.'));
+  } else {
+    for (const event of data.activity) {
+      const row = document.createElement('div');
+      row.className = 'result';
+
+      row.textContent =
+        formatDate(event.created) +
+        ' · ' + event.action +
+        (event.details ? ' · ' + event.details : '');
+
+      activityBox.append(row);
+    }
+  }
+
+  $('adminMemberDetails').scrollIntoView({
+    behavior: 'smooth',
+    block: 'start'
+  });
+}
+
+async function loadAdminStats() {
+  const stats = await api('admin/stats');
+
+  $('adminTotalUsers').textContent =
+    Number(stats.total_users).toLocaleString();
+
+  $('adminActiveLicenses').textContent =
+    Number(stats.active_licenses).toLocaleString();
+
+  $('adminGenerated').textContent =
+    Number(stats.generated_usernames).toLocaleString();
+
+  $('adminSuspended').textContent =
+    Number(stats.suspended_users).toLocaleString();
+
+  $('adminChecks').textContent =
+    Number(stats.checked_usernames).toLocaleString();
+
+  $('adminRevoked').textContent =
+    Number(stats.revoked_licenses).toLocaleString();
+}
+
+async function loadAdminActivity() {
+  const limit = Number($('adminActivityLimit').value) || 50;
+
+  const events = await api(
+    'admin/activity?limit=' + limit
+  );
+
+  const box = $('adminActivity');
+  box.replaceChildren();
+
+  if (!events.length) {
+    box.append(makeEmpty('No activity recorded yet.'));
+    return;
+  }
+
+  for (const event of events) {
+    const row = document.createElement('div');
+    row.className = 'result';
+
+    const info = document.createElement('span');
+    info.textContent =
+      formatDate(event.created) +
+      ' · ' + event.username +
+      ' · ' + event.action +
+      (event.details ? ' · ' + event.details : '');
+
+    row.append(info);
     box.append(row);
   }
 }
@@ -492,7 +790,6 @@ async function loadAdmin() {
 
   for (const user of users) {
     const option = document.createElement('option');
-
     option.value = user.id;
     option.textContent =
       user.username +
@@ -502,7 +799,7 @@ async function loadAdmin() {
   }
 
   if (users.some(
-    u => String(u.id) === previousSelection
+    user => String(user.id) === previousSelection
   )) {
     userSelect.value = previousSelection;
   }
@@ -513,113 +810,46 @@ async function loadAdmin() {
   licensesBox.replaceChildren();
 
   if (!licenses.length) {
-    const empty = document.createElement('p');
-    empty.className = 'muted';
-    empty.textContent = 'No licenses found.';
-    licensesBox.append(empty);
+    licensesBox.append(makeEmpty('No licenses found.'));
+  } else {
+    for (const license of licenses) {
+      licensesBox.append(licenseRow(license));
+    }
   }
 
-  for (const license of licenses) {
-    const row = document.createElement('div');
-    row.className = 'result';
+  await Promise.all([
+    loadAdminStats(),
+    loadAdminActivity()
+  ]);
 
-    const expired = license.expires_at &&
-      new Date(license.expires_at).getTime() <=
-      Date.now();
-
-    const status = license.revoked
-      ? 'Revoked'
-      : expired
-        ? 'Expired'
-        : 'Active';
-
-    const info = document.createElement('span');
-
-    info.textContent =
-      '#' + license.id +
-      ' · ' + license.username + ' · ';
-
-    const statusLabel = document.createElement('strong');
-
-    statusLabel.className =
-      'license-status ' +
-      (status === 'Active'
-        ? 'status-active'
-        : status === 'Revoked'
-          ? 'status-revoked'
-          : 'status-expired');
-
-    statusLabel.textContent = status;
-
-    const expiry = document.createElement('span');
-    expiry.className = 'license-expiry';
-
-    expiry.textContent =
-      'Expires: ' +
-      (license.expires_at || 'Never');
-
-    const button = document.createElement('button');
-
-    button.className =
-      'tiny ' +
-      (license.revoked
-        ? 'success-button'
-        : 'danger-button');
-
-    button.textContent =
-      license.revoked
-        ? 'Reactivate'
-        : 'Revoke';
-
-    button.onclick = async () => {
-      const action =
-        license.revoked
-          ? 'reactivate'
-          : 'revoke';
-
-      if (!confirm(
-        'Are you sure you want to ' +
-        action +
-        ' license #' +
-        license.id + '?'
-      )) return;
-
-      button.disabled = true;
-
-      try {
-        const result = await api(
-          'admin/licenses/' +
-          license.id +
-          '/' +
-          action,
-          {}
-        );
-
-        await loadAdmin();
-
-        adminNotice(
-          result.message ||
-          'License updated successfully!',
-          'success'
-        );
-      } catch (e) {
-        adminNotice(e.message, 'error');
-        button.disabled = false;
-      }
-    };
-
-    row.append(
-      info,
-      statusLabel,
-      expiry,
-      button
+  if (selectedAdminMember !== null) {
+    const stillExists = users.some(
+      user => user.id === selectedAdminMember
     );
 
-    licensesBox.append(row);
+    if (stillExists) {
+      await showMemberDetails(selectedAdminMember);
+    } else {
+      selectedAdminMember = null;
+      $('adminMemberDetails').hidden = true;
+    }
   }
 }
 
 $('adminUserSearch').oninput = renderAdminUsers;
+
+$('adminActivityLimit').onchange = async () => {
+  try {
+    await loadAdminActivity();
+  } catch (e) {
+    adminNotice(e.message, 'error');
+  }
+};
+
+$('adminCloseMember').onclick = () => {
+  selectedAdminMember = null;
+  $('adminMemberDetails').hidden = true;
+};
 
 $('createUserForm').onsubmit = async e => {
   e.preventDefault();
@@ -632,13 +862,10 @@ $('createUserForm').onsubmit = async e => {
     $('createUserForm').querySelector('button');
 
   if (adminUserCache.some(
-    u => u.username.toLowerCase() ===
+    user => user.username.toLowerCase() ===
       username.toLowerCase()
   )) {
-    adminNotice(
-      'Username already exists!',
-      'error'
-    );
+    adminNotice('Username already exists!', 'error');
     return;
   }
 
@@ -658,9 +885,7 @@ $('createUserForm').onsubmit = async e => {
     $('licenseUser').value = String(user.id);
 
     adminNotice(
-      user.message ||
-      'Member successfully created!',
-      'success'
+      user.message || 'Member successfully created!'
     );
   } catch (e) {
     adminNotice(e.message, 'error');
@@ -698,9 +923,7 @@ $('createLicenseForm').onsubmit = async e => {
     await loadAdmin();
 
     adminNotice(
-      result.message ||
-      'License successfully generated!',
-      'success'
+      result.message || 'License successfully generated!'
     );
   } catch (e) {
     adminNotice(e.message, 'error');
@@ -715,10 +938,7 @@ $('copyLicense').onclick = async () => {
       $('newLicenseKey').value
     );
 
-    adminNotice(
-      'License key copied!',
-      'success'
-    );
+    adminNotice('License key copied!');
   } catch {
     adminNotice(
       'Could not copy the license key.',
@@ -730,11 +950,7 @@ $('copyLicense').onclick = async () => {
 $('refreshAdmin').onclick = async () => {
   try {
     await loadAdmin();
-
-    adminNotice(
-      'Dashboard refreshed!',
-      'success'
-    );
+    adminNotice('Dashboard refreshed!');
   } catch (e) {
     adminNotice(e.message, 'error');
   }
@@ -792,11 +1008,7 @@ async function start() {
     ]);
 
   } catch (e) {
-    console.error(
-      'Initialization failed:',
-      e
-    );
-
+    console.error('Initialization failed:', e);
     showLogin();
   }
 }
@@ -817,16 +1029,13 @@ $('loginForm').onsubmit = async e => {
       username: $('user').value,
       password: $('password').value,
       license_key: $('key').value,
-      remember: remember
+      remember
     });
 
     if (remember) {
-      // The backend sets an HttpOnly cookie.
-      // No password or license key is stored here.
       token = '';
       sessionStorage.removeItem('winter_token');
     } else {
-      // Short session for this browser tab.
       token = data.token || '';
 
       if (!token) {
@@ -835,10 +1044,7 @@ $('loginForm').onsubmit = async e => {
         );
       }
 
-      sessionStorage.setItem(
-        'winter_token',
-        token
-      );
+      sessionStorage.setItem('winter_token', token);
     }
 
     $('password').value = '';
@@ -868,11 +1074,10 @@ $('platform').onchange = () => {
   statuses = {};
   searchId = null;
 
+  $('checkedStat').textContent = '0';
   render();
 
-  notice(
-    'Platform changed. Generate a new batch.'
-  );
+  notice('Platform changed. Generate a new batch.');
 };
 
 $('generateBtn').onclick = async () => {
@@ -888,6 +1093,7 @@ $('generateBtn').onclick = async () => {
     statuses = {};
     searchId = null;
 
+    $('checkedStat').textContent = '0';
     render();
 
     notice(
@@ -907,9 +1113,7 @@ $('generateBtn').onclick = async () => {
 $('checkBtn').onclick = async () => {
   try {
     if (!names.length) {
-      throw Error(
-        'Generate usernames first'
-      );
+      throw Error('Generate usernames first');
     }
 
     const data = await api('check', {
@@ -920,9 +1124,9 @@ $('checkBtn').onclick = async () => {
     searchId = data.search_id;
 
     statuses = Object.fromEntries(
-      data.results.map(r => [
-        r.username,
-        r.status
+      data.results.map(row => [
+        row.username,
+        row.status
       ])
     );
 
@@ -933,8 +1137,7 @@ $('checkBtn').onclick = async () => {
     await loadHistory();
 
     notice(
-      'Manual review started. ' +
-      'Unknown is not verified.'
+      'Manual review started. Unknown is not verified.'
     );
   } catch (e) {
     notice(e.message);
@@ -1016,9 +1219,7 @@ $('wordlist').onchange = async e => {
   if (!file) return;
 
   if (file.size > 2000000) {
-    notice(
-      'Wordlist must be under 2 MB'
-    );
+    notice('Wordlist must be under 2 MB');
     return;
   }
 
@@ -1046,6 +1247,5 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// Try restoring an existing login.
-// The backend will recognize a remembered cookie.
+// Restore an existing login or remembered cookie.
 start();
