@@ -1,4 +1,4 @@
-/* winter.cc Frontend V7.9 - Visible notice, progress and provider cooldowns.
+/* winter.cc Frontend V7.10 - Automatic resume after Discord provider cooldowns.
    Full replacement, preserving Owner Dashboard, login, favorites, presets and exports.
    Backend pacing and Discord rate-limit responses are always respected. */
 
@@ -601,7 +601,7 @@ function updateResumeCooldown() {
   const seconds = retrySecondsRemaining();
   button.disabled = checkingInProgress || generatingInProgress || seconds > 0;
   button.textContent = seconds
-    ? 'Discord cooldown · retry in ' + cooldownText(seconds)
+    ? 'Waiting for Discord · auto-resume in ' + cooldownText(seconds)
     : 'Resume unfinished checks';
 }
 function updateCheckButtons() {
@@ -609,8 +609,26 @@ function updateCheckButtons() {
   $('generateBtn').disabled=checkingInProgress||generatingInProgress;
   updateResumeCooldown();
 }
-// Purely a countdown: never makes network requests by itself.
-setInterval(updateResumeCooldown, 1000);
+// Resume a paused Discord queue only when the exact provider-supplied
+// retry time has elapsed. While waiting, this timer makes zero network calls.
+// Browser timers can be throttled in background tabs; returning to the page
+// allows the queue to continue without pressing Resume.
+let automaticDiscordResumeStarting = false;
+function tryAutomaticDiscordResume() {
+  updateResumeCooldown();
+  if (automaticDiscordResumeStarting || checkingInProgress || generatingInProgress ||
+      !checkRun || checkRun.platform !== 'Discord' || !checkRun.pending?.length ||
+      !Number(checkRun.retryAt) || retrySecondsRemaining() > 0 || $('app').hidden) {
+    return;
+  }
+  automaticDiscordResumeStarting = true;
+  runChecks().catch(error => notice('Automatic resume interrupted: ' + error.message))
+    .finally(() => { automaticDiscordResumeStarting = false; });
+}
+setInterval(tryAutomaticDiscordResume, 1000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) tryAutomaticDiscordResume();
+});
 function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
 function temporary(error) {
   return /failed to fetch|load failed|network|timeout|unexpected response|temporarily unavailable/i.test(String(error.message||error));
@@ -655,8 +673,8 @@ async function runChecks() {
   if (checkRun.platform !== $('platform').value) throw Error('Platform changed');
   const cooldown = retrySecondsRemaining();
   if (cooldown) {
-    notice('Discord requested a cooldown. ' + checkRun.pending.length +
-      ' usernames remain queued. Retry in ' + cooldownText(cooldown) + '.');
+    notice('Waiting for Discord. ' + checkRun.pending.length +
+      ' usernames are saved and will automatically resume in ' + cooldownText(cooldown) + '.');
     $('winter-v6-resume').hidden = false;
     updateResumeCooldown();
     return;
@@ -728,8 +746,8 @@ async function runChecks() {
             const seconds = Number.isFinite(raw) && raw > 0
               ? Math.min(3600, Math.ceil(raw)) : 60;
             checkRun.retryAt = Date.now() + seconds * 1000;
-            pausedReason = friendlyReason(reason) +
-              '; retry in ' + cooldownText(seconds);
+            pausedReason = 'Discord has temporarily limited checking; ' +
+              'automatic resume in ' + cooldownText(seconds);
             saveCheckRun();
           } else {
             pausedReason = friendlyReason(reason);
@@ -775,7 +793,11 @@ async function runChecks() {
     const tally = counts();
     const remaining = checkRun ? checkRun.pending.length : 0;
     const intro = remaining
-      ? 'Check paused. ' + remaining + ' remaining. ' + (pausedReason ? pausedReason + '. ' : '')
+      ? (discord && retrySecondsRemaining() > 0
+          ? 'Saved ' + remaining + ' unfinished usernames. ' +
+            'Checking will automatically continue when Discord permits it. '
+          : 'Check paused. ' + remaining + ' remaining. ') +
+        (pausedReason ? pausedReason + '. ' : '')
       : 'Check finished. ';
     notice(intro +
       'Available: ' + tally.available +
