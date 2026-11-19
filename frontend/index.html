@@ -14,15 +14,24 @@
     <form id="loginForm" class="panel login">
       <h1>❄ winter<span>.cc</span></h1>
       <p>Private username generator · Authorized access only</p>
+
       <label>Username
         <input id="user" required autocomplete="username">
       </label>
+
       <label>Password
         <input id="password" type="password" required autocomplete="current-password">
       </label>
+
       <label>License key
         <input id="key" required autocomplete="off">
       </label>
+
+      <label class="remember-login">
+        <input id="rememberLogin" type="checkbox">
+        Remember my login
+      </label>
+
       <button type="submit">Unlock dashboard</button>
       <div id="loginError" class="error" role="alert"></div>
     </form>
