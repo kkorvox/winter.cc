@@ -1,60 +1,47 @@
+"""winter.cc Windows desktop app.
 
-import sys
-import webbrowser
-import tkinter as tk
-from tkinter import messagebox
+This is a native WebView2 window showing the *live* winter.cc site.
+It uses the same server, frontend, login, and result handling as the web app.
+Requires Internet access and the Microsoft Edge WebView2 Runtime.
+"""
 
-APP_NAME = "winter.cc"
-APP_URL = "https://winter-cc.onrender.com"
+import os
+from pathlib import Path
 
-try:
-    import webview
-except ImportError:
-    root = tk.Tk()
-    root.withdraw()
-
-    messagebox.showerror(
-        APP_NAME,
-        "The desktop application is missing a required component."
-    )
-    sys.exit(1)
+import webview
 
 
-def open_in_browser():
-    webbrowser.open(APP_URL)
+SITE_URL = "https://winter-cc.onrender.com/"
 
 
 def main():
-    try:
-        webview.create_window(
-            title="winter.cc — Username Studio",
-            url=APP_URL,
-            width=1200,
-            height=800,
-            min_size=(800, 550),
-            resizable=True,
-            background_color="#0b0912",
-            text_select=True
-        )
+    # Cookies persist so the website's Remember Me option works.
+    storage_base = Path(
+        os.environ.get("LOCALAPPDATA", str(Path.home()))
+    ) / "winter.cc" / "WebView2"
+    storage_base.mkdir(parents=True, exist_ok=True)
 
-        webview.start(
-            gui="edgechromium",
-            debug=False,
-            private_mode=False
-        )
+    # Match the site's download/export and external profile links.
+    webview.settings["ALLOW_DOWNLOADS"] = True
+    webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
 
-    except Exception as error:
-        root = tk.Tk()
-        root.withdraw()
+    webview.create_window(
+        title="winter.cc",
+        url=SITE_URL,
+        width=1250,
+        height=820,
+        min_size=(740, 540),
+        resizable=True,
+        background_color="#120b20",
+        text_select=True,
+    )
 
-        retry = messagebox.askyesno(
-            APP_NAME,
-            "Unable to start the desktop window.\n\n"
-            "Would you like to open winter.cc in your browser?"
-        )
-
-        if retry:
-            open_in_browser()
+    webview.start(
+        gui="edgechromium",
+        private_mode=False,
+        storage_path=str(storage_base),
+        debug=False,
+    )
 
 
 if __name__ == "__main__":
