@@ -19,6 +19,7 @@ from .core import (
     candidates, start_search, hash_key, RULES, now,
     create_user, create_license, log_activity
 )
+from .checker import check_batch, MAX_BATCH_SIZE
 
 init()
 setup_owner()
@@ -31,7 +32,6 @@ app = FastAPI(
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-
 COOKIE_NAME = "winter_session"
 REMEMBER_SECONDS = 30 * 24 * 60 * 60
 
@@ -70,6 +70,15 @@ class Generate(BaseModel):
 class Check(BaseModel):
     platform: str
     usernames: list[str] = Field(max_length=100000)
+
+
+class AutoCheck(BaseModel):
+    platform: str
+    search_id: int
+    usernames: list[str] = Field(
+        min_length=1,
+        max_length=25
+    )
 
 
 class Mark(BaseModel):
@@ -159,14 +168,12 @@ def require(
     authorization: str | None = Header(None)
 ):
     token, from_cookie = get_token(
-        request,
-        authorization
+        request, authorization
     )
 
     if not token:
         raise HTTPException(
-            401,
-            "Login required"
+            401, "Login required"
         )
 
     if (
@@ -191,8 +198,7 @@ def require(
 def require_admin(user=Depends(require)):
     if not user["is_admin"]:
         raise HTTPException(
-            403,
-            "Owner access required"
+            403, "Owner access required"
         )
 
     return user
@@ -210,14 +216,12 @@ def get_member(conn, user_id, lock=False):
         query += " FOR UPDATE"
 
     row = conn.execute(
-        query,
-        (user_id,)
+        query, (user_id,)
     ).fetchone()
 
     if not row:
         raise HTTPException(
-            404,
-            "Member not found"
+            404, "Member not found"
         )
 
     return row
@@ -287,8 +291,7 @@ def logout(
     authorization: str | None = Header(None)
 ):
     token, from_cookie = get_token(
-        request,
-        authorization
+        request, authorization
     )
 
     if from_cookie:
@@ -322,7 +325,11 @@ def platforms(user=Depends(require)):
             "characters": "".join(
                 sorted(rule[2])
             ),
-            "checking": "manual"
+            "checking": (
+                "automatic"
+                if name in ("Roblox", "Minecraft")
+                else "unknown"
+            )
         }
         for name, rule in RULES.items()
     }
@@ -344,11 +351,9 @@ def generate(
             body.amount,
             body.wordlist
         )
-
     except ValueError as error:
         raise HTTPException(
-            400,
-            str(error)
+            400, str(error)
         )
 
     log_activity(
@@ -372,8 +377,7 @@ def check(
 ):
     if len(body.usernames) > 100000:
         raise HTTPException(
-            400,
-            "Too many names"
+            400, "Too many names"
         )
 
     try:
@@ -382,17 +386,163 @@ def check(
             body.platform,
             body.usernames
         )
-
     except ValueError as error:
         raise HTTPException(
-            400,
-            str(error)
+            400, str(error)
         )
 
     return {
         "search_id": search_id,
         "results": rows,
-        "message": "Manual verification required."
+        "message": (
+            "Search created. Use /api/check/auto "
+            "to verify usernames in batches."
+        )
+    }
+
+
+@app.post("/api/check/auto")
+def automatic_check(
+    body: AutoCheck,
+    user=Depends(require)
+):
+    if body.platform not in RULES:
+        raise HTTPException(
+            400, "Unsupported platform"
+        )
+
+    unique = list(dict.fromkeys(
+        str(name).strip()
+        for name in body.usernames
+        if str(name).strip()
+    ))
+
+    if not unique:
+        raise HTTPException(
+            400, "No usernames provided"
+        )
+
+    if len(unique) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            400,
+            f"Maximum {MAX_BATCH_SIZE} usernames per batch"
+        )
+
+    # Confirm ownership and the platform before
+    # contacting any external service.
+    with db() as conn:
+        search = conn.execute(
+            """SELECT id,platform
+               FROM searches
+               WHERE id=%s AND user_id=%s""",
+            (
+                body.search_id,
+                user["id"]
+            )
+        ).fetchone()
+
+        if not search:
+            raise HTTPException(
+                404, "Search not found"
+            )
+
+        if search["platform"] != body.platform:
+            raise HTTPException(
+                400, "Platform does not match search"
+            )
+
+        stored = conn.execute(
+            """SELECT username,status
+               FROM results
+               WHERE search_id=%s
+               AND username=ANY(%s)""",
+            (
+                body.search_id,
+                unique
+            )
+        ).fetchall()
+
+    stored_status = {
+        row["username"]: row["status"]
+        for row in stored
+    }
+
+    if len(stored_status) != len(unique):
+        raise HTTPException(
+            400,
+            "Some usernames do not belong to this search"
+        )
+
+    # Preserve manually verified and skipped results.
+    pending = [
+        name for name in unique
+        if stored_status[name] == "unknown"
+    ]
+
+    if not pending:
+        return {
+            "search_id": body.search_id,
+            "platform": body.platform,
+            "results": [
+                {
+                    "username": name,
+                    "status": stored_status[name],
+                    "reason": "already_recorded"
+                }
+                for name in unique
+            ],
+            "checked": 0,
+            "total": len(unique),
+            "remaining": 0
+        }
+
+    try:
+        checked = check_batch(
+            body.platform,
+            pending
+        )
+    except ValueError as error:
+        raise HTTPException(
+            400, str(error)
+        )
+
+    updates = [
+        item
+        for item in checked["results"]
+        if item["status"] in (
+            "available", "claimed"
+        )
+    ]
+
+    # Update only unknown rows. Never overwrite
+    # a result manually changed by a user.
+    with db() as conn:
+        for item in updates:
+            conn.execute(
+                """UPDATE results
+                   SET status=%s
+                   WHERE search_id=%s
+                   AND username=%s
+                   AND status='unknown'""",
+                (
+                    item["status"],
+                    body.search_id,
+                    item["username"]
+                )
+            )
+
+    log_activity(
+        user["id"],
+        "automatic_check",
+        (
+            f"{body.platform}: "
+            f"{checked['checked']} checked"
+        )
+    )
+
+    return {
+        "search_id": body.search_id,
+        **checked
     }
 
 
@@ -407,8 +557,7 @@ def mark(
         "unknown"
     ):
         raise HTTPException(
-            400,
-            "Invalid status"
+            400, "Invalid status"
         )
 
     with db() as conn:
@@ -429,8 +578,7 @@ def mark(
 
         if not row:
             raise HTTPException(
-                404,
-                "Result not found"
+                404, "Result not found"
             )
 
         if row["status"] == "skipped":
@@ -575,8 +723,7 @@ def save_preset(
 ):
     if not 1 <= len(body.name) <= 50:
         raise HTTPException(
-            400,
-            "Invalid preset name"
+            400, "Invalid preset name"
         )
 
     with db() as conn:
@@ -751,8 +898,7 @@ def admin_user_details(
 ):
     with db() as conn:
         member = get_member(
-            conn,
-            user_id
+            conn, user_id
         )
 
         licenses = conn.execute(
@@ -792,26 +938,20 @@ def admin_create_user(
 
     if not username:
         raise HTTPException(
-            400,
-            "Username is required"
+            400, "Username is required"
         )
 
     try:
         user_id = create_user(
-            username,
-            body.password
+            username, body.password
         )
-
     except UniqueViolation:
         raise HTTPException(
-            409,
-            "Username already exists!"
+            409, "Username already exists!"
         )
-
     except ValueError as error:
         raise HTTPException(
-            400,
-            str(error)
+            400, str(error)
         )
 
     log_activity(
@@ -840,9 +980,7 @@ def admin_delete_user(
 
     with db() as conn:
         target = get_member(
-            conn,
-            user_id,
-            lock=True
+            conn, user_id, lock=True
         )
 
         if target["is_admin"]:
@@ -894,9 +1032,7 @@ def admin_reset_password(
 
     with db() as conn:
         target = get_member(
-            conn,
-            user_id,
-            lock=True
+            conn, user_id, lock=True
         )
 
         if target["is_admin"]:
@@ -940,9 +1076,7 @@ def admin_set_suspension(
 ):
     with db() as conn:
         target = get_member(
-            conn,
-            user_id,
-            lock=True
+            conn, user_id, lock=True
         )
 
         if target["is_admin"]:
@@ -1022,14 +1156,11 @@ def admin_create_license(
 
     try:
         key = create_license(
-            user_id,
-            expires
+            user_id, expires
         )
-
     except ForeignKeyViolation:
         raise HTTPException(
-            404,
-            "User no longer exists"
+            404, "User no longer exists"
         )
 
     log_activity(
@@ -1069,8 +1200,7 @@ def admin_renew_license(
 
         if not row:
             raise HTTPException(
-                404,
-                "License not found"
+                404, "License not found"
             )
 
         if row["revoked"]:
@@ -1117,8 +1247,7 @@ def admin_revoke_license(
 
         if not row:
             raise HTTPException(
-                404,
-                "License not found"
+                404, "License not found"
             )
 
         if (
@@ -1190,8 +1319,7 @@ def admin_reactivate_license(
 
         if not row:
             raise HTTPException(
-                404,
-                "License not found"
+                404, "License not found"
             )
 
         conn.execute(
