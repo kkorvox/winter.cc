@@ -1,4 +1,4 @@
-/* winter.cc Frontend V7.7 - Visible notice + per-username results progress.
+/* winter.cc Frontend V7.9 - Visible notice, progress and provider cooldowns.
    Full replacement, preserving Owner Dashboard, login, favorites, presets and exports.
    Backend pacing and Discord rate-limit responses are always respected. */
 
@@ -67,7 +67,7 @@ const ROBLOX_BATCH_SIZE = 5;
 const SOCIAL_BATCH_SIZE = 3;
 // V7.0 backend already spaces Discord requests and honors 429 responses.
 // This small UI gap avoids an unnecessary additional 5.5-second pause.
-const DISCORD_DELAY_MS = 900;
+const DISCORD_DELAY_MS = 5500; // conservative spacing; Discord may still request longer cooldowns
 const PAUSE_REASONS = new Set([
   'discord_rate_limited', 'discord_access_blocked',
   'discord_paused', 'discord_batch_limit', 'rate_limited',
@@ -585,11 +585,32 @@ function progress(processed,total,label) {
   $('winter-v6-fill').style.width=percent+'%';
   $('checkedStat').textContent=processed.toLocaleString();
 }
+function retrySecondsRemaining() {
+  if (!checkRun || checkRun.platform !== 'Discord') return 0;
+  const retryAt = Number(checkRun.retryAt) || 0;
+  return Math.max(0, Math.ceil((retryAt - Date.now()) / 1000));
+}
+function cooldownText(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes ? minutes + 'm ' + String(remainder).padStart(2, '0') + 's' : seconds + 's';
+}
+function updateResumeCooldown() {
+  const button = $('winter-v6-resume');
+  if (!button) return;
+  const seconds = retrySecondsRemaining();
+  button.disabled = checkingInProgress || generatingInProgress || seconds > 0;
+  button.textContent = seconds
+    ? 'Discord cooldown · retry in ' + cooldownText(seconds)
+    : 'Resume unfinished checks';
+}
 function updateCheckButtons() {
   $('checkBtn').disabled=checkingInProgress||generatingInProgress;
   $('generateBtn').disabled=checkingInProgress||generatingInProgress;
-  if($('winter-v6-resume'))$('winter-v6-resume').disabled=checkingInProgress||generatingInProgress;
+  updateResumeCooldown();
 }
+// Purely a countdown: never makes network requests by itself.
+setInterval(updateResumeCooldown, 1000);
 function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
 function temporary(error) {
   return /failed to fetch|load failed|network|timeout|unexpected response|temporarily unavailable/i.test(String(error.message||error));
@@ -632,6 +653,15 @@ async function runChecks() {
   if (checkingInProgress || generatingInProgress) return;
   if (!checkRun) throw Error('No search to resume');
   if (checkRun.platform !== $('platform').value) throw Error('Platform changed');
+  const cooldown = retrySecondsRemaining();
+  if (cooldown) {
+    notice('Discord requested a cooldown. ' + checkRun.pending.length +
+      ' usernames remain queued. Retry in ' + cooldownText(cooldown) + '.');
+    $('winter-v6-resume').hidden = false;
+    updateResumeCooldown();
+    return;
+  }
+  if (checkRun.retryAt) { checkRun.retryAt = 0; saveCheckRun(); }
 
   const version = generationVersion;
   const discord = checkRun.platform === 'Discord';
@@ -690,8 +720,20 @@ async function runChecks() {
         checkReasons[name] = reason;
 
         if (PAUSE_REASONS.has(reason)) {
-          // A rejected lookup is still Pending for manual retry.
-          pausedReason = friendlyReason(reason);
+          // Keep rejected lookups pending, and honor the retry time the API supplies.
+          if (discord && (reason === 'discord_rate_limited' ||
+                          reason === 'discord_access_blocked' ||
+                          reason === 'discord_paused')) {
+            const raw = Number(item.retry_after);
+            const seconds = Number.isFinite(raw) && raw > 0
+              ? Math.min(3600, Math.ceil(raw)) : 60;
+            checkRun.retryAt = Date.now() + seconds * 1000;
+            pausedReason = friendlyReason(reason) +
+              '; retry in ' + cooldownText(seconds);
+            saveCheckRun();
+          } else {
+            pausedReason = friendlyReason(reason);
+          }
           render();
           continue;
         }
@@ -744,6 +786,7 @@ async function runChecks() {
       '. Use the Results tabs to filter.');
 
     resume.hidden = !remaining;
+    updateResumeCooldown();
     if (!remaining) {
       checkRun = null;
       saveCheckRun();
@@ -822,6 +865,7 @@ async function start() {
         checkRun=saved;searchId=saved.id;
         names=[...saved.done,...saved.pending];statuses={...Object.fromEntries(names.map(n=>[n,'unknown'])),...(saved.statuses||saved.snapshot||{})};sources={...(saved.sources||{})};checkReasons={...(saved.reasons||{})};
         $('winter-v6-resume').hidden=!saved.pending.length;
+        updateResumeCooldown();
         progress(saved.done.length,names.length,'Paused '+saved.platform);
         render();
       }
@@ -899,27 +943,26 @@ document.addEventListener('keydown',e=>{
     e.preventDefault();$('generateBtn').click();
   }
 });
-// Existing HTML has a Windows download button. Always point it at the
-// newest signed-off release instead of an obsolete v1.0.0 build.
+// Keep the desktop download link consistent with the public GitHub release.
+// The release must actually exist and pass developer security review first.
 function refreshDesktopDownloadLinks() {
   const downloadUrl =
-    'https://github.com/kkorvox/winter.cc/releases/latest/download/wintercc.exe';
+    'https://github.com/kkorvox/winter.cc/releases/download/v7.8/wintercc.exe';
   const detailsUrl =
-    'https://github.com/kkorvox/winter.cc/releases/latest';
-  document.querySelectorAll('a[href*="/releases/download/v1.0.0/wintercc.exe"]').forEach(a => {
+    'https://github.com/kkorvox/winter.cc/releases/tag/v7.8';
+  const downloads = document.getElementById('downloads');
+  if (!downloads) return;
+  downloads.querySelectorAll('a[href*="wintercc.exe"]').forEach(a => {
     a.href = downloadUrl;
   });
-  document.querySelectorAll('a[href*="/releases/tag/v1.0.0"]').forEach(a => {
-    a.href = detailsUrl;
+  downloads.querySelectorAll('a[href*="/releases/tag/"], a[href*="/releases/latest"]').forEach(a => {
+    if (!a.href.includes('wintercc.exe')) a.href = detailsUrl;
   });
-  const downloads = document.getElementById('downloads');
-  if (downloads) {
-    const eyebrow = downloads.querySelector('.eyebrow');
-    if (eyebrow) eyebrow.textContent = 'DESKTOP APPLICATION / V7.7';
-    for (const paragraph of downloads.querySelectorAll('p.muted')) {
-      if (paragraph.textContent.trim().startsWith('Version 1.0.0')) {
-        paragraph.textContent = 'Version 7.7 · Windows 10/11 · Internet required';
-      }
+  const eyebrow = downloads.querySelector('.eyebrow');
+  if (eyebrow) eyebrow.textContent = 'DESKTOP APPLICATION / V7.8';
+  for (const paragraph of downloads.querySelectorAll('p.muted')) {
+    if (/^Version (?:1\.0\.0|7\.7|7\.8)/.test(paragraph.textContent.trim())) {
+      paragraph.textContent = 'Version 7.8 · Windows 10/11 · Internet required';
     }
   }
 }
