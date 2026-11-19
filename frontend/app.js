@@ -24,14 +24,18 @@ const chars = [
 async function api(path, body, method = 'POST') {
   const response = await fetch('/api/' + path, {
     method: body === undefined ? 'GET' : method,
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: 'Bearer ' + token } : {})
     },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    ...(body === undefined ? {} : {
+      body: JSON.stringify(body)
+    })
   });
 
   let data;
+
   try {
     data = await response.json();
   } catch {
@@ -39,7 +43,10 @@ async function api(path, body, method = 'POST') {
   }
 
   if (!response.ok) {
-    if (response.status === 401 && path !== 'login') showLogin();
+    if (response.status === 401 && path !== 'login') {
+      showLogin();
+    }
+
     throw Error(
       typeof data.detail === 'string'
         ? data.detail
@@ -54,7 +61,9 @@ function showLogin() {
   token = '';
   isAdmin = false;
   adminUserCache = [];
+
   sessionStorage.removeItem('winter_token');
+
   $('app').hidden = true;
   $('login').hidden = false;
 }
@@ -70,14 +79,20 @@ function notice(message) {
 
 function adminNotice(message, kind = 'success') {
   const box = $('adminMessage');
+
   box.textContent = message;
   box.className = 'admin-feedback ' +
-    (kind === 'error' ? 'feedback-error' : 'feedback-success');
+    (kind === 'error'
+      ? 'feedback-error'
+      : 'feedback-success');
 }
 
 function checked(id) {
-  return [...document.querySelectorAll('#' + id + ' input:checked')]
-    .map(x => x.value);
+  return [
+    ...document.querySelectorAll(
+      '#' + id + ' input:checked'
+    )
+  ].map(x => x.value);
 }
 
 function config() {
@@ -103,13 +118,18 @@ function checkboxes(id, values, selected) {
     checkbox.value = value;
     checkbox.checked = selected.includes(value);
 
-    label.append(checkbox, document.createTextNode(' ' + value));
+    label.append(
+      checkbox,
+      document.createTextNode(' ' + value)
+    );
+
     return label;
   }));
 }
 
 function link(platform, name) {
   const n = encodeURIComponent(name);
+
   return {
     Discord: 'https://discord.com/',
     Roblox: 'https://www.roblox.com/users/profile',
@@ -121,24 +141,44 @@ function link(platform, name) {
 }
 
 function download(ext, content, mime) {
-  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const url = URL.createObjectURL(
+    new Blob([content], { type: mime })
+  );
+
   const a = document.createElement('a');
+
   a.href = url;
-  a.download = 'wintercc-' + $('platform').value.toLowerCase() + '.' + ext;
+  a.download =
+    'wintercc-' +
+    $('platform').value.toLowerCase() +
+    '.' + ext;
+
   a.click();
+
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
 function sortedNames() {
   const arr = names.filter(n =>
-    n.toLowerCase().includes($('filter').value.toLowerCase())
+    n.toLowerCase().includes(
+      $('filter').value.toLowerCase()
+    )
   );
 
   switch ($('sort').value) {
-    case 'az': arr.sort(); break;
-    case 'za': arr.sort().reverse(); break;
-    case 'short': arr.sort((a, b) => a.length - b.length); break;
+    case 'az':
+      arr.sort();
+      break;
+
+    case 'za':
+      arr.sort().reverse();
+      break;
+
+    case 'short':
+      arr.sort((a, b) => a.length - b.length);
+      break;
   }
+
   return arr;
 }
 
@@ -158,7 +198,8 @@ function render() {
 
     const status = document.createElement('span');
     status.className = 'status';
-    status.textContent = statuses[n] || 'Not checked';
+    status.textContent =
+      statuses[n] || 'Not checked';
 
     const fav = document.createElement('button');
     fav.className = 'tiny';
@@ -171,6 +212,7 @@ function render() {
           platform: $('platform').value,
           username: n
         });
+
         await loadFavorites();
       } catch (e) {
         notice(e.message);
@@ -189,14 +231,17 @@ function render() {
     if (searchId && statuses[n] !== 'skipped') {
       const select = document.createElement('select');
 
-      for (const x of ['unknown', 'available', 'claimed']) {
+      for (const x of [
+        'unknown', 'available', 'claimed'
+      ]) {
         const option = document.createElement('option');
         option.value = x;
         option.textContent = x + ' (manual)';
         select.append(option);
       }
 
-      select.value = statuses[n] || 'unknown';
+      select.value =
+        statuses[n] || 'unknown';
 
       select.onchange = async () => {
         try {
@@ -205,6 +250,7 @@ function render() {
             username: n,
             status: select.value
           });
+
           statuses[n] = select.value;
           render();
         } catch (e) {
@@ -221,18 +267,24 @@ function render() {
   if (filtered.length > 500) {
     const p = document.createElement('p');
     p.className = 'muted';
+
     p.textContent =
-      'Showing first 500 filtered results. Export includes all ' +
+      'Showing first 500 filtered results. ' +
+      'Export includes all ' +
       names.length + ' names.';
+
     list.append(p);
   }
 
-  $('generatedStat').textContent = names.length.toLocaleString();
+  $('generatedStat').textContent =
+    names.length.toLocaleString();
 }
 
 async function loadFavorites() {
   const favorites = await api('favorites');
+
   $('favStat').textContent = favorites.length;
+
   const box = $('favoriteList');
   box.replaceChildren();
 
@@ -241,7 +293,8 @@ async function loadFavorites() {
     row.className = 'result';
 
     const label = document.createElement('span');
-    label.textContent = x.username + ' · ' + x.platform;
+    label.textContent =
+      x.username + ' · ' + x.platform;
 
     const button = document.createElement('button');
     button.className = 'tiny';
@@ -250,11 +303,14 @@ async function loadFavorites() {
     button.onclick = async () => {
       try {
         await api(
-          'favorites/' + encodeURIComponent(x.platform) +
-          '/' + encodeURIComponent(x.username),
+          'favorites/' +
+          encodeURIComponent(x.platform) +
+          '/' +
+          encodeURIComponent(x.username),
           {},
           'DELETE'
         );
+
         await loadFavorites();
       } catch (e) {
         notice(e.message);
@@ -268,22 +324,28 @@ async function loadFavorites() {
 
 async function loadHistory() {
   const history = await api('history');
+
   const box = $('historyList');
   box.replaceChildren();
 
   for (const s of history) {
     const row = document.createElement('div');
     row.className = 'result';
+
     row.textContent =
-      '#' + s.id + ' · ' + s.platform + ' · ' +
+      '#' + s.id +
+      ' · ' + s.platform +
+      ' · ' +
       s.created.slice(0, 19).replace('T', ' ') +
       ' · ' + s.results.length + ' shown';
+
     box.append(row);
   }
 }
 
 async function loadPresets() {
   const presets = await api('presets');
+
   const box = $('presetList');
   box.replaceChildren();
 
@@ -294,6 +356,7 @@ async function loadPresets() {
 
     button.onclick = () => {
       const c = p.config;
+
       $('platform').value = c.platform;
       $('amount').value = c.amount;
       $('prefix').value = c.prefix;
@@ -301,11 +364,25 @@ async function loadPresets() {
 
       checkboxes(
         'lengths',
-        Array.from({ length: 31 }, (_, i) => String(i + 2)),
+        Array.from(
+          { length: 31 },
+          (_, i) => String(i + 2)
+        ),
         (c.lengths || []).map(String)
       );
-      checkboxes('types', types, c.types || []);
-      checkboxes('characters', chars, c.characters || []);
+
+      checkboxes(
+        'types',
+        types,
+        c.types || []
+      );
+
+      checkboxes(
+        'characters',
+        chars,
+        c.characters || []
+      );
+
       notice('Preset loaded');
     };
 
@@ -319,7 +396,9 @@ function renderAdminUsers() {
   const box = $('adminUsers');
   box.replaceChildren();
 
-  const query = $('adminUserSearch').value.trim().toLowerCase();
+  const query = $('adminUserSearch')
+    .value.trim().toLowerCase();
+
   const users = adminUserCache.filter(user =>
     user.username.toLowerCase().includes(query)
   );
@@ -337,9 +416,13 @@ function renderAdminUsers() {
     row.className = 'result';
 
     const info = document.createElement('span');
+
     info.textContent =
-      '#' + user.id + ' · ' + user.username +
-      (user.is_admin ? ' · Owner' : ' · Member');
+      '#' + user.id +
+      ' · ' + user.username +
+      (user.is_admin
+        ? ' · Owner'
+        : ' · Member');
 
     row.append(info);
 
@@ -350,8 +433,11 @@ function renderAdminUsers() {
 
       button.onclick = async () => {
         const confirmed = confirm(
-          'Permanently delete "' + user.username + '"?\n\n' +
-          'This removes the account, licenses, and saved data. ' +
+          'Permanently delete "' +
+          user.username +
+          '"?\n\n' +
+          'This removes the account, licenses, ' +
+          'and saved data. ' +
           'This cannot be undone.'
         );
 
@@ -368,9 +454,12 @@ function renderAdminUsers() {
 
           $('newLicenseBox').hidden = true;
           $('newLicenseKey').value = '';
+
           await loadAdmin();
+
           adminNotice(
-            result.message || 'Member successfully deleted!',
+            result.message ||
+            'Member successfully deleted!',
             'success'
           );
         } catch (e) {
@@ -398,17 +487,23 @@ async function loadAdmin() {
 
   const userSelect = $('licenseUser');
   const previousSelection = userSelect.value;
+
   userSelect.replaceChildren();
 
   for (const user of users) {
     const option = document.createElement('option');
+
     option.value = user.id;
     option.textContent =
-      user.username + (user.is_admin ? ' (Owner)' : '');
+      user.username +
+      (user.is_admin ? ' (Owner)' : '');
+
     userSelect.append(option);
   }
 
-  if (users.some(u => String(u.id) === previousSelection)) {
+  if (users.some(
+    u => String(u.id) === previousSelection
+  )) {
     userSelect.value = previousSelection;
   }
 
@@ -429,51 +524,82 @@ async function loadAdmin() {
     row.className = 'result';
 
     const expired = license.expires_at &&
-      new Date(license.expires_at).getTime() <= Date.now();
+      new Date(license.expires_at).getTime() <=
+      Date.now();
 
     const status = license.revoked
       ? 'Revoked'
-      : expired ? 'Expired' : 'Active';
+      : expired
+        ? 'Expired'
+        : 'Active';
 
     const info = document.createElement('span');
+
     info.textContent =
-      '#' + license.id + ' · ' + license.username + ' · ';
+      '#' + license.id +
+      ' · ' + license.username + ' · ';
 
     const statusLabel = document.createElement('strong');
-    statusLabel.className = 'license-status ' +
-      (status === 'Active' ? 'status-active' :
-       status === 'Revoked' ? 'status-revoked' : 'status-expired');
+
+    statusLabel.className =
+      'license-status ' +
+      (status === 'Active'
+        ? 'status-active'
+        : status === 'Revoked'
+          ? 'status-revoked'
+          : 'status-expired');
+
     statusLabel.textContent = status;
 
     const expiry = document.createElement('span');
     expiry.className = 'license-expiry';
+
     expiry.textContent =
-      'Expires: ' + (license.expires_at || 'Never');
+      'Expires: ' +
+      (license.expires_at || 'Never');
 
     const button = document.createElement('button');
-    button.className = 'tiny ' +
-      (license.revoked ? 'success-button' : 'danger-button');
-    button.textContent = license.revoked ? 'Reactivate' : 'Revoke';
+
+    button.className =
+      'tiny ' +
+      (license.revoked
+        ? 'success-button'
+        : 'danger-button');
+
+    button.textContent =
+      license.revoked
+        ? 'Reactivate'
+        : 'Revoke';
 
     button.onclick = async () => {
-      const action = license.revoked ? 'reactivate' : 'revoke';
+      const action =
+        license.revoked
+          ? 'reactivate'
+          : 'revoke';
 
       if (!confirm(
-        'Are you sure you want to ' + action +
-        ' license #' + license.id + '?'
+        'Are you sure you want to ' +
+        action +
+        ' license #' +
+        license.id + '?'
       )) return;
 
       button.disabled = true;
 
       try {
         const result = await api(
-          'admin/licenses/' + license.id + '/' + action,
+          'admin/licenses/' +
+          license.id +
+          '/' +
+          action,
           {}
         );
 
         await loadAdmin();
+
         adminNotice(
-          result.message || 'License updated successfully!',
+          result.message ||
+          'License updated successfully!',
           'success'
         );
       } catch (e) {
@@ -482,7 +608,13 @@ async function loadAdmin() {
       }
     };
 
-    row.append(info, statusLabel, expiry, button);
+    row.append(
+      info,
+      statusLabel,
+      expiry,
+      button
+    );
+
     licensesBox.append(row);
   }
 }
@@ -494,12 +626,19 @@ $('createUserForm').onsubmit = async e => {
 
   const username = $('newUsername').value.trim();
   const password = $('newPassword').value;
-  const button = e.submitter || $('createUserForm').querySelector('button');
+
+  const button =
+    e.submitter ||
+    $('createUserForm').querySelector('button');
 
   if (adminUserCache.some(
-    u => u.username.toLowerCase() === username.toLowerCase()
+    u => u.username.toLowerCase() ===
+      username.toLowerCase()
   )) {
-    adminNotice('Username already exists!', 'error');
+    adminNotice(
+      'Username already exists!',
+      'error'
+    );
     return;
   }
 
@@ -515,10 +654,12 @@ $('createUserForm').onsubmit = async e => {
     $('newPassword').value = '';
 
     await loadAdmin();
+
     $('licenseUser').value = String(user.id);
 
     adminNotice(
-      user.message || 'Member successfully created!',
+      user.message ||
+      'Member successfully created!',
       'success'
     );
   } catch (e) {
@@ -531,19 +672,23 @@ $('createUserForm').onsubmit = async e => {
 $('createLicenseForm').onsubmit = async e => {
   e.preventDefault();
 
-  const button = e.submitter ||
+  const button =
+    e.submitter ||
     $('createLicenseForm').querySelector('button');
 
   button.disabled = true;
 
   try {
     const expiry = $('licenseExpiry').value;
+
     const expiresAt = expiry
       ? new Date(expiry).toISOString()
       : null;
 
     const result = await api(
-      'admin/users/' + $('licenseUser').value + '/licenses',
+      'admin/users/' +
+      $('licenseUser').value +
+      '/licenses',
       { expires_at: expiresAt }
     );
 
@@ -553,7 +698,8 @@ $('createLicenseForm').onsubmit = async e => {
     await loadAdmin();
 
     adminNotice(
-      result.message || 'License successfully generated!',
+      result.message ||
+      'License successfully generated!',
       'success'
     );
   } catch (e) {
@@ -565,17 +711,30 @@ $('createLicenseForm').onsubmit = async e => {
 
 $('copyLicense').onclick = async () => {
   try {
-    await navigator.clipboard.writeText($('newLicenseKey').value);
-    adminNotice('License key copied!', 'success');
-  } catch (e) {
-    adminNotice('Could not copy the license key.', 'error');
+    await navigator.clipboard.writeText(
+      $('newLicenseKey').value
+    );
+
+    adminNotice(
+      'License key copied!',
+      'success'
+    );
+  } catch {
+    adminNotice(
+      'Could not copy the license key.',
+      'error'
+    );
   }
 };
 
 $('refreshAdmin').onclick = async () => {
   try {
     await loadAdmin();
-    adminNotice('Dashboard refreshed!', 'success');
+
+    adminNotice(
+      'Dashboard refreshed!',
+      'success'
+    );
   } catch (e) {
     adminNotice(e.message, 'error');
   }
@@ -586,6 +745,7 @@ $('refreshAdmin').onclick = async () => {
 async function start() {
   try {
     const me = await api('me');
+
     $('who').textContent = me.username;
     isAdmin = Boolean(me.is_admin);
 
@@ -593,6 +753,7 @@ async function start() {
     $('owner').hidden = !isAdmin;
 
     platforms = await api('platforms');
+
     $('platform').replaceChildren(
       ...Object.keys(platforms).map(name => {
         const option = document.createElement('option');
@@ -604,14 +765,21 @@ async function start() {
 
     checkboxes(
       'lengths',
-      Array.from({ length: 31 }, (_, i) => String(i + 2)),
+      Array.from(
+        { length: 31 },
+        (_, i) => String(i + 2)
+      ),
       ['3', '4', '5']
     );
+
     checkboxes('types', types, [
-      'Random letters', 'Letters + numbers'
+      'Random letters',
+      'Letters + numbers'
     ]);
+
     checkboxes('characters', chars, [
-      'Lowercase', 'Numbers'
+      'Lowercase',
+      'Numbers'
     ]);
 
     showApp();
@@ -622,8 +790,13 @@ async function start() {
       loadPresets(),
       ...(isAdmin ? [loadAdmin()] : [])
     ]);
+
   } catch (e) {
-    console.error('Initialization failed:', e);
+    console.error(
+      'Initialization failed:',
+      e
+    );
+
     showLogin();
   }
 }
@@ -631,30 +804,62 @@ async function start() {
 $('loginForm').onsubmit = async e => {
   e.preventDefault();
 
+  const button = $('loginForm')
+    .querySelector('button[type="submit"]');
+
+  button.disabled = true;
+  $('loginError').textContent = '';
+
   try {
+    const remember = $('rememberLogin').checked;
+
     const data = await api('login', {
       username: $('user').value,
       password: $('password').value,
-      license_key: $('key').value
+      license_key: $('key').value,
+      remember: remember
     });
 
-    token = data.token;
-    sessionStorage.setItem('winter_token', token);
+    if (remember) {
+      // The backend sets an HttpOnly cookie.
+      // No password or license key is stored here.
+      token = '';
+      sessionStorage.removeItem('winter_token');
+    } else {
+      // Short session for this browser tab.
+      token = data.token || '';
+
+      if (!token) {
+        throw Error(
+          'Login response did not include a session'
+        );
+      }
+
+      sessionStorage.setItem(
+        'winter_token',
+        token
+      );
+    }
 
     $('password').value = '';
     $('key').value = '';
-    $('loginError').textContent = '';
 
     await start();
+
   } catch (e) {
     $('loginError').textContent = e.message;
+  } finally {
+    button.disabled = false;
   }
 };
 
 $('logout').onclick = async () => {
   try {
     await api('logout', {});
-  } catch (e) {}
+  } catch (e) {
+    console.error('Logout request failed:', e);
+  }
+
   showLogin();
 };
 
@@ -662,24 +867,37 @@ $('platform').onchange = () => {
   names = [];
   statuses = {};
   searchId = null;
+
   render();
-  notice('Platform changed. Generate a new batch.');
+
+  notice(
+    'Platform changed. Generate a new batch.'
+  );
 };
 
 $('generateBtn').onclick = async () => {
   try {
     notice('Generating...');
-    const data = await api('generate', config());
+
+    const data = await api(
+      'generate',
+      config()
+    );
+
     names = data.usernames;
     statuses = {};
     searchId = null;
+
     render();
 
     notice(
-      'Generated ' + data.generated.toLocaleString() +
+      'Generated ' +
+      data.generated.toLocaleString() +
       ' unique usernames' +
       (data.generated < data.requested
-        ? ' (combination space exhausted)' : '') + '.'
+        ? ' (combination space exhausted)'
+        : '') +
+      '.'
     );
   } catch (e) {
     notice(e.message);
@@ -688,7 +906,11 @@ $('generateBtn').onclick = async () => {
 
 $('checkBtn').onclick = async () => {
   try {
-    if (!names.length) throw Error('Generate usernames first');
+    if (!names.length) {
+      throw Error(
+        'Generate usernames first'
+      );
+    }
 
     const data = await api('check', {
       platform: $('platform').value,
@@ -696,14 +918,24 @@ $('checkBtn').onclick = async () => {
     });
 
     searchId = data.search_id;
+
     statuses = Object.fromEntries(
-      data.results.map(r => [r.username, r.status])
+      data.results.map(r => [
+        r.username,
+        r.status
+      ])
     );
-    $('checkedStat').textContent = data.results.length;
+
+    $('checkedStat').textContent =
+      data.results.length;
 
     render();
     await loadHistory();
-    notice('Manual review started. Unknown is not verified.');
+
+    notice(
+      'Manual review started. ' +
+      'Unknown is not verified.'
+    );
   } catch (e) {
     notice(e.message);
   }
@@ -711,10 +943,15 @@ $('checkBtn').onclick = async () => {
 
 $('savePreset').onclick = async () => {
   const name = prompt('Preset name:');
+
   if (!name) return;
 
   try {
-    await api('presets', { name, config: config() });
+    await api('presets', {
+      name,
+      config: config()
+    });
+
     await loadPresets();
     notice('Preset saved');
   } catch (e) {
@@ -726,22 +963,34 @@ $('filter').oninput = render;
 $('sort').onchange = render;
 
 $('copy').onclick = () => {
-  navigator.clipboard.writeText(sortedNames().join('\n')).then(
-    () => notice('Copied usernames'),
-    () => notice('Unable to copy usernames')
-  );
+  navigator.clipboard
+    .writeText(sortedNames().join('\n'))
+    .then(
+      () => notice('Copied usernames'),
+      () => notice('Unable to copy usernames')
+    );
 };
 
 $('txt').onclick = () => download(
-  'txt', sortedNames().join('\n'), 'text/plain'
+  'txt',
+  sortedNames().join('\n'),
+  'text/plain'
 );
 
 $('csv').onclick = () => download(
   'csv',
   'username,status,platform\n' +
   sortedNames().map(n =>
-    [n, statuses[n] || 'not checked', $('platform').value]
-      .map(x => '"' + String(x).replaceAll('"', '""') + '"')
+    [
+      n,
+      statuses[n] || 'not checked',
+      $('platform').value
+    ]
+      .map(x =>
+        '"' +
+        String(x).replaceAll('"', '""') +
+        '"'
+      )
       .join(',')
   ).join('\n'),
   'text/csv'
@@ -749,20 +998,27 @@ $('csv').onclick = () => download(
 
 $('json').onclick = () => download(
   'json',
-  JSON.stringify(sortedNames().map(n => ({
-    username: n,
-    status: statuses[n] || 'not checked',
-    platform: $('platform').value
-  })), null, 2),
+  JSON.stringify(
+    sortedNames().map(n => ({
+      username: n,
+      status: statuses[n] || 'not checked',
+      platform: $('platform').value
+    })),
+    null,
+    2
+  ),
   'application/json'
 );
 
 $('wordlist').onchange = async e => {
   const file = e.target.files[0];
+
   if (!file) return;
 
   if (file.size > 2000000) {
-    notice('Wordlist must be under 2 MB');
+    notice(
+      'Wordlist must be under 2 MB'
+    );
     return;
   }
 
@@ -772,7 +1028,11 @@ $('wordlist').onchange = async e => {
     .filter(Boolean)
     .slice(0, 20000);
 
-  notice('Imported ' + wordlist.length + ' words');
+  notice(
+    'Imported ' +
+    wordlist.length +
+    ' words'
+  );
 };
 
 document.addEventListener('keydown', e => {
@@ -786,4 +1046,6 @@ document.addEventListener('keydown', e => {
   }
 });
 
-if (token) start();
+// Try restoring an existing login.
+// The backend will recognize a remembered cookie.
+start();
