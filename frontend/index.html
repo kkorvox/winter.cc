@@ -65,7 +65,7 @@
       <main>
         <section class="hero">
           <div>
-            <div class="eyebrow">PRIVATE WORKSPACE / V2.0</div>
+            <div class="eyebrow">PRIVATE WORKSPACE / V3.0</div>
             <h1>Username studio</h1>
             <p>Generate, organize and review username ideas across six platforms.</p>
           </div>
@@ -179,7 +179,6 @@
 
         <section id="downloads" class="panel">
           <div class="eyebrow">DESKTOP APPLICATION / V1.0.0</div>
-
           <h2>❄ winter.cc for Windows</h2>
 
           <p class="muted">
@@ -221,12 +220,12 @@
         </section>
 
         <section id="owner" class="panel" hidden>
-          <div class="eyebrow">ADMINISTRATION / V2.0</div>
-
-          <h2>♛ Owner Dashboard</h2>
+          <div class="eyebrow">ADMINISTRATION / V3.0</div>
+          <h2>♛ Owner Dashboard V3</h2>
 
           <p class="muted">
-            Manage member accounts, license access, and permissions.
+            Manage members, monitor activity, review statistics,
+            and control license access.
           </p>
 
           <div
@@ -235,6 +234,35 @@
             role="status"
             aria-live="polite"
           ></div>
+
+          <h3>Overview statistics</h3>
+
+          <div class="stats">
+            <div class="panel">
+              <small>Total members</small>
+              <strong id="adminTotalUsers">0</strong>
+            </div>
+            <div class="panel">
+              <small>Active licenses</small>
+              <strong id="adminActiveLicenses">0</strong>
+            </div>
+            <div class="panel">
+              <small>Generated usernames</small>
+              <strong id="adminGenerated">0</strong>
+            </div>
+            <div class="panel">
+              <small>Suspended members</small>
+              <strong id="adminSuspended">0</strong>
+            </div>
+            <div class="panel">
+              <small>Manual checks</small>
+              <strong id="adminChecks">0</strong>
+            </div>
+            <div class="panel">
+              <small>Revoked licenses</small>
+              <strong id="adminRevoked">0</strong>
+            </div>
+          </div>
 
           <h3>Create member account</h3>
 
@@ -286,7 +314,6 @@
 
           <div id="newLicenseBox" hidden>
             <h3>New license key — save it now</h3>
-
             <input id="newLicenseKey" readonly>
 
             <div class="actions">
@@ -301,25 +328,67 @@
           </div>
 
           <div class="section-head">
-            <h3>Members</h3>
-
+            <h3>Member management</h3>
             <div class="actions">
               <input
                 id="adminUserSearch"
                 placeholder="Search members"
+                autocomplete="off"
               >
             </div>
           </div>
 
           <p class="muted">
-            Deleting a member permanently removes their account,
-            licenses, and saved data. Owner accounts cannot be deleted.
+            Select a member to view their activity and licenses.
+            You can reset passwords or suspend member accounts.
+            Deleting a member permanently removes their saved data.
           </p>
 
           <div id="adminUsers"></div>
 
-          <h3>Licenses</h3>
+          <div id="adminMemberDetails" class="panel" hidden>
+            <h3 id="adminMemberTitle">Member details</h3>
+
+            <div id="adminMemberInfo"></div>
+
+            <h3>Member licenses</h3>
+            <div id="adminMemberLicenses"></div>
+
+            <h3>Recent member activity</h3>
+            <div id="adminMemberActivity"></div>
+
+            <div class="actions">
+              <button
+                id="adminCloseMember"
+                type="button"
+                class="secondary"
+              >
+                Close Details
+              </button>
+            </div>
+          </div>
+
+          <h3>License management</h3>
+
+          <p class="muted">
+            Renew expiration dates, revoke licenses, or
+            reactivate previously revoked licenses.
+          </p>
+
           <div id="adminLicenses"></div>
+
+          <h3>Recent activity</h3>
+
+          <div class="actions">
+            <select id="adminActivityLimit">
+              <option value="25">Last 25 events</option>
+              <option value="50" selected>Last 50 events</option>
+              <option value="100">Last 100 events</option>
+              <option value="200">Last 200 events</option>
+            </select>
+          </div>
+
+          <div id="adminActivity"></div>
 
           <div class="actions">
             <button
