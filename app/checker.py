@@ -1,11 +1,10 @@
-"""winter.cc checker V7.9 - respectful Discord cooldowns plus working platform checks.
+"""winter.cc checker V7.6 - public profile checking plus working Discord and Minecraft.
 
 Replace app/checker.py. Preserve the interface used by app/main.py.
 Neither rate limits nor availability guarantees can be removed by a checker.
 """
 
 import json
-import math
 import re
 import socket
 import ssl
@@ -36,7 +35,7 @@ POMELO_MIN_INTERVAL = 5.5
 SOCIAL_TIMEOUT = 5
 SOCIAL_INTERVAL = {"Instagram": 2.5, "TikTok": 2.5, "Telegram": 1.5}
 _social_locks = {p: threading.RLock() for p in SOCIAL_INTERVAL}
-DISCORD_MAX_PER_BATCH = 4  # Safeguard for direct batch requests; website sends 1
+DISCORD_MAX_PER_BATCH = 4
 MINECRAFT_BULK_SIZE = 10
 MAX_CACHE_ENTRIES = 2000
 CACHE_SECONDS = {"available": 15, "claimed": 120, "invalid": 300}
@@ -168,14 +167,6 @@ def _block(platform, seconds):
         _cooldowns[platform] = max(
             _cooldowns.get(platform, 0), time.monotonic() + seconds
         )
-
-
-def _cooldown_remaining(platform):
-    """Seconds remaining in a provider's cooldown (local to this worker)."""
-    with _slots_lock:
-        return max(0, int(math.ceil(
-            _cooldowns.get(platform, 0) - time.monotonic()
-        )))
 
 
 def _roblox(username):
@@ -425,62 +416,50 @@ def _discord_invalid_code(payload):
 
 
 def _discord(username):
-    """Direct eligibility lookup, honoring provider-advertised retry limits."""
+    """Preserves the working direct Discord eligibility method."""
     with _discord_lock:
         cached = _cache_get("Discord", username)
         if cached:
             return cached
-
-        remaining = _cooldown_remaining("Discord")
-        if remaining:
-            return result(username, "unknown", "discord_rate_limited",
-                          retry_after=remaining)
-
         if not _wait_slot("Discord", DISCORD_MIN_INTERVAL):
-            return result(username, "unknown", "discord_rate_limited",
-                          retry_after=max(1, _cooldown_remaining("Discord")))
-
+            return result(username, "unknown", "discord_rate_limited")
         request = Request(
             DISCORD_URL,
             data=json.dumps({"username": username}).encode("utf-8"),
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "winter.cc/7.9",
+                "User-Agent": "winter.cc/7.0",
             },
             method="POST",
         )
         try:
             with urlopen(request, timeout=DISCORD_TIMEOUT) as response:
                 data = json.load(response)
-                remaining_header = response.headers.get("X-RateLimit-Remaining")
+                remaining = response.headers.get("X-RateLimit-Remaining")
                 reset = response.headers.get("X-RateLimit-Reset-After")
-                if remaining_header is not None and reset is not None:
+                if remaining is not None and reset is not None:
                     try:
-                        if int(remaining_header) <= 0:
-                            _block("Discord", _retry_after(reset, default=60))
+                        if int(remaining) <= 0:
+                            _block("Discord", max(1.0, min(float(reset), 3600)))
                     except (TypeError, ValueError, OverflowError):
                         pass
         except HTTPError as error:
             if error.code == 429:
-                retry = (error.headers.get("Retry-After") or
-                         error.headers.get("X-RateLimit-Reset-After"))
-                seconds = _retry_after(retry, default=60.0)
+                seconds = _retry_after(error.headers.get("Retry-After"))
                 try:
-                    payload = json.loads(error.read(2048).decode("utf-8"))
-                    if isinstance(payload, dict) and payload.get("retry_after") is not None:
+                    body = json.loads(error.read(2048).decode("utf-8"))
+                    if isinstance(body, dict):
                         seconds = max(seconds, _retry_after(
-                            payload["retry_after"], default=60.0
+                            body.get("retry_after"), default=0.0
                         ))
-                except (OSError, ValueError, UnicodeError, TypeError):
+                except (OSError, ValueError, UnicodeError):
                     pass
                 _block("Discord", seconds)
-                return result(username, "unknown", "discord_rate_limited",
-                              retry_after=_cooldown_remaining("Discord"))
+                return result(username, "unknown", "discord_rate_limited")
             if error.code in (401, 403):
                 _block("Discord", 180.0)
-                return result(username, "unknown", "discord_access_blocked",
-                              retry_after=_cooldown_remaining("Discord"))
+                return result(username, "unknown", "discord_access_blocked")
             if error.code == 400:
                 try:
                     body = json.loads(error.read(4096).decode("utf-8"))
@@ -496,16 +475,14 @@ def _discord(username):
             return result(username, "unknown", _network_reason(error, "discord"))
         except (ValueError, UnicodeError):
             return result(username, "unknown", "discord_invalid_response")
-
         if not isinstance(data, dict) or type(data.get("taken")) is not bool:
             return result(username, "unknown", "discord_unexpected_response")
-
         checked = result(
             username,
             "claimed" if data["taken"] else "available",
             "discord_reported_taken" if data["taken"] else "discord_reported_available",
-            provider="Discord", cached=False,
         )
+        checked.update({"provider": "Discord", "cached": False})
         _cache_set("Discord", username, checked)
         return checked
 
@@ -639,8 +616,7 @@ def check_batch(platform, usernames):
             results.append(checked)
             if checked.get("reason") in ("discord_rate_limited", "discord_access_blocked"):
                 for rest in batch[i + 1:]:
-                    results.append(result(rest.lower(), "unknown", "discord_paused",
-                                          retry_after=checked.get("retry_after", 60)))
+                    results.append(result(rest.lower(), "unknown", "discord_paused"))
                 break
     elif platform == "Roblox":
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(batch))) as pool:
