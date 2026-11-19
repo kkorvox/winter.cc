@@ -1,9 +1,19 @@
+
+"""winter.cc username checker V6.9.
+
+Discord Auto Check uses Discord's unauthenticated eligibility endpoint,
+not Pomelo. Unclear responses never count as available.
+
+Pomelo remains available for the Owner Dashboard diagnostic.
+"""
+
 import json
 import re
 import socket
 import ssl
 import threading
 import time
+
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -11,343 +21,1111 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-SUPPORTED_PLATFORMS = ("Discord", "Roblox", "Instagram", "TikTok", "Telegram", "Minecraft")
+
+SUPPORTED_PLATFORMS = (
+    "Discord",
+    "Roblox",
+    "Instagram",
+    "TikTok",
+    "Telegram",
+    "Minecraft",
+)
+
 NETWORK_CHECKERS = ("Roblox", "Minecraft")
-POMELO_URL = "https://api.pomelo.lixqa.cc/v1/lookups"
+
 MAX_BATCH_SIZE = 25
 MAX_WORKERS = 4
-CACHE_SECONDS = 300
-NEGATIVE_CACHE_SECONDS = 60
-MIN_REQUEST_INTERVAL = 1.5
-POMELO_INTERVAL = 5.5
-POMELO_MAX_PER_BATCH = 4
+
+DISCORD_URL = (
+    "https://discord.com/api/v9/"
+    "unique-username/username-attempt-unauthed"
+)
+
+POMELO_URL = (
+    "https://api.pomelo.lixqa.cc/v1/lookups"
+)
+
 REQUEST_TIMEOUT = 7
-POMELO_TIMEOUT = 15
-MAX_RETRIES = 1
-_cache_lock = threading.Lock()
-_schedule_lock = threading.Lock()
-_pomelo_lock = threading.Lock()
+DISCORD_TIMEOUT = 7
+POMELO_TIMEOUT = 8
+
+DISCORD_MIN_INTERVAL = 3.0
+DISCORD_MAX_PER_BATCH = 4
+POMELO_MIN_INTERVAL = 5.5
+
+# Cache available names only briefly.
+CACHE_SECONDS = {
+    "available": 20,
+    "claimed": 120,
+    "invalid": 300,
+}
+
 _cache = {}
-_next_request = {}
-_cooldown = {}
-_pomelo_next_request = 0.0
-_pomelo_cooldown_until = 0.0
+_cache_lock = threading.Lock()
+
+_general_lock = threading.Lock()
+_general_next = {}
+_general_cooldown = {}
+
+_discord_lock = threading.Lock()
+_discord_next = 0.0
+_discord_cooldown = 0.0
+
+_pomelo_lock = threading.Lock()
+_pomelo_next = 0.0
+
+
+# =====================================
+# RESULTS AND VALIDATION
+# =====================================
 
 def result(username, status="unknown", reason=""):
-    return {"username": username, "status": status, "reason": reason}
+    return {
+        "username": username,
+        "status": status,
+        "reason": reason,
+    }
+
 
 def validate_username(platform, username):
     if platform not in SUPPORTED_PLATFORMS:
         return False, "unsupported_platform"
+
     if not isinstance(username, str):
         return False, "invalid_username_type"
+
     if not username:
         return False, "empty_username"
+
     if platform == "Discord":
-        if not 2 <= len(username) <= 32:
+        name = username.lower()
+
+        if not 2 <= len(name) <= 32:
             return False, "discord_invalid_length"
-        if not re.fullmatch(r"[a-z0-9._]+", username):
+
+        if not re.fullmatch(r"[a-z0-9._]+", name):
             return False, "discord_invalid_characters"
-        if ".." in username:
+
+        if ".." in name:
             return False, "discord_consecutive_periods"
-        if username.startswith(".") or username.endswith("."):
-            return False, "discord_invalid_period_position"
+
         return True, "discord_format_valid"
+
     if platform == "Roblox":
-        valid = (3 <= len(username) <= 20 and bool(re.fullmatch(r"[A-Za-z0-9_]+", username)) and not username.startswith("_") and not username.endswith("_") and username.count("_") <= 1)
+        valid = (
+            3 <= len(username) <= 20
+            and re.fullmatch(
+                r"[A-Za-z0-9_]+", username
+            ) is not None
+            and not username.startswith("_")
+            and not username.endswith("_")
+            and username.count("_") <= 1
+        )
+
     elif platform == "Instagram":
-        valid = 1 <= len(username) <= 30 and bool(re.fullmatch(r"[A-Za-z0-9._]+", username)) and not username.endswith(".")
+        valid = (
+            1 <= len(username) <= 30
+            and re.fullmatch(
+                r"[A-Za-z0-9._]+", username
+            ) is not None
+            and not username.endswith(".")
+        )
+
     elif platform == "TikTok":
-        valid = 2 <= len(username) <= 24 and bool(re.fullmatch(r"[A-Za-z0-9._]+", username)) and not username.endswith(".")
+        valid = (
+            2 <= len(username) <= 24
+            and re.fullmatch(
+                r"[A-Za-z0-9._]+", username
+            ) is not None
+            and not username.endswith(".")
+        )
+
     elif platform == "Telegram":
-        valid = 5 <= len(username) <= 32 and bool(re.fullmatch(r"[A-Za-z0-9_]+", username)) and bool(re.match(r"[A-Za-z]", username))
-    elif platform == "Minecraft":
-        valid = 3 <= len(username) <= 16 and bool(re.fullmatch(r"[A-Za-z0-9_]+", username))
+        valid = (
+            5 <= len(username) <= 32
+            and re.fullmatch(
+                r"[A-Za-z0-9_]+", username
+            ) is not None
+            and re.match(
+                r"[A-Za-z]", username
+            ) is not None
+        )
+
     else:
-        valid = False
-    return (True, "format_valid") if valid else (False, "invalid_format")
+        valid = (
+            3 <= len(username) <= 16
+            and re.fullmatch(
+                r"[A-Za-z0-9_]+", username
+            ) is not None
+        )
+
+    if valid:
+        return True, "format_valid"
+
+    return False, "invalid_format"
+
+
+# =====================================
+# CACHE
+# =====================================
 
 def _cache_get(platform, username):
-    key = (platform, username.lower())
     with _cache_lock:
-        item = _cache.get(key)
-        if item is None:
+        key = (platform, username.lower())
+        entry = _cache.get(key)
+
+        if not entry:
             return None
-        saved, expires = item
+
+        value, expires = entry
+
         if expires <= time.monotonic():
-            del _cache[key]
+            _cache.pop(key, None)
             return None
-        response = dict(saved)
-        response["cached"] = True
-        return response
 
-def _cache_set(platform, username, data):
-    status = data.get("status", "unknown")
-    reason = data.get("reason", "")
-    if (reason.startswith("pomelo_") and status == "unknown") or reason in ("rate_limited", "network_error", "http_error", "invalid_response"):
+        answer = dict(value)
+        answer["cached"] = True
+
+        return answer
+
+
+def _cache_set(platform, username, checked):
+    ttl = CACHE_SECONDS.get(
+        checked.get("status")
+    )
+
+    if ttl is None:
         return
-    ttl = CACHE_SECONDS if status in ("available", "claimed", "invalid") else NEGATIVE_CACHE_SECONDS
-    with _cache_lock:
-        _cache[(platform, username.lower())] = (dict(data), time.monotonic() + ttl)
 
-def _retry_after_seconds(value):
-    if not value:
-        return 60.0
+    with _cache_lock:
+        _cache[
+            (platform, username.lower())
+        ] = (
+            dict(checked),
+            time.monotonic() + ttl,
+        )
+
+
+# =====================================
+# NETWORK HELPERS
+# =====================================
+
+def _retry_after(value, default=60.0):
+    if value is None:
+        return default
+
     try:
-        return max(5.0, min(float(value), 300.0))
+        return max(
+            1.0,
+            min(float(value), 3600.0)
+        )
     except (TypeError, ValueError):
         pass
+
     try:
-        date = parsedate_to_datetime(value)
-        if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
-        return max(5.0, min((date - datetime.now(timezone.utc)).total_seconds(), 300.0))
-    except (TypeError, ValueError, OverflowError):
-        return 60.0
+        dt = parsedate_to_datetime(value)
 
-def _wait_for_request_slot(platform):
-    while True:
-        with _schedule_lock:
-            now = time.monotonic()
-            if now < _cooldown.get(platform, 0):
-                return False
-            next_allowed = _next_request.get(platform, 0)
-            if now >= next_allowed:
-                _next_request[platform] = now + MIN_REQUEST_INTERVAL
-                return True
-            delay = next_allowed - now
-        time.sleep(min(delay, 0.25))
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
 
-def _request_json(platform, url):
-    for attempt in range(MAX_RETRIES + 1):
-        if not _wait_for_request_slot(platform):
+        seconds = (
+            dt - datetime.now(timezone.utc)
+        ).total_seconds()
+
+        return max(
+            1.0,
+            min(seconds, 3600.0)
+        )
+
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
+        return default
+
+
+def _network_reason(error, prefix):
+    reason = (
+        error.reason
+        if isinstance(error, URLError)
+        else error
+    )
+
+    if isinstance(reason, ssl.SSLError):
+        return prefix + "_ssl_error"
+
+    if isinstance(reason, socket.gaierror):
+        return prefix + "_dns_error"
+
+    if isinstance(
+        reason,
+        (TimeoutError, socket.timeout),
+    ):
+        return prefix + "_timeout"
+
+    if isinstance(
+        reason,
+        ConnectionRefusedError,
+    ):
+        return prefix + "_connection_refused"
+
+    return prefix + "_network_error"
+
+
+def _get_json(platform, url):
+    with _general_lock:
+        now = time.monotonic()
+
+        if now < _general_cooldown.get(
+            platform, 0
+        ):
             return None, "rate_limited"
-        request = Request(url, headers={"Accept": "application/json", "User-Agent": "winter.cc/6.8"})
-        try:
-            with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-                return json.load(response), None
-        except HTTPError as error:
-            if error.code == 429:
-                delay = _retry_after_seconds(error.headers.get("Retry-After"))
-                with _schedule_lock:
-                    _cooldown[platform] = max(_cooldown.get(platform, 0), time.monotonic() + delay)
-                return None, "rate_limited"
-            if error.code == 404:
-                return None, "not_found"
-            if error.code in (500, 502, 503, 504) and attempt < MAX_RETRIES:
-                time.sleep(0.5)
-                continue
-            return None, "http_error"
-        except (URLError, TimeoutError, OSError):
-            if attempt < MAX_RETRIES:
-                time.sleep(0.5)
-                continue
-            return None, "network_error"
-        except (ValueError, UnicodeError):
-            return None, "invalid_response"
-    return None, "network_error"
+
+        delay = max(
+            0.0,
+            _general_next.get(platform, 0) - now,
+        )
+
+        _general_next[platform] = (
+            max(
+                now,
+                _general_next.get(platform, 0),
+            ) + 1.5
+        )
+
+    if delay:
+        time.sleep(delay)
+
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "winter.cc/6.9",
+        },
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=REQUEST_TIMEOUT,
+        ) as response:
+            return json.load(response), None
+
+    except HTTPError as error:
+        if error.code == 404:
+            return None, "not_found"
+
+        if error.code == 429:
+            seconds = _retry_after(
+                error.headers.get("Retry-After")
+            )
+
+            with _general_lock:
+                _general_cooldown[platform] = max(
+                    _general_cooldown.get(
+                        platform, 0
+                    ),
+                    time.monotonic() + seconds,
+                )
+
+            return None, "rate_limited"
+
+        return None, "http_" + str(error.code)
+
+    except (
+        URLError,
+        TimeoutError,
+        OSError,
+    ):
+        return None, "network_error"
+
+    except (ValueError, UnicodeError):
+        return None, "invalid_response"
+
+
+# =====================================
+# ROBLOX
+# =====================================
 
 def _check_roblox(username):
-    params = urlencode({"request.username": username, "request.birthday": "2000-01-01T00:00:00Z", "request.context": "Signup"})
-    data, error = _request_json("Roblox", "https://auth.roblox.com/v1/usernames/validate?" + params)
+    params = urlencode({
+        "request.username": username,
+        "request.birthday": (
+            "2000-01-01T00:00:00Z"
+        ),
+        "request.context": "Signup",
+    })
+
+    url = (
+        "https://auth.roblox.com"
+        "/v1/usernames/validate?"
+        + params
+    )
+
+    data, error = _get_json(
+        "Roblox",
+        url,
+    )
+
     if error:
-        return "unknown", error
+        return result(
+            username,
+            "unknown",
+            error,
+        )
+
     if not isinstance(data, dict):
-        return "unknown", "invalid_response"
-    if data.get("code") == 0:
-        return "available", "roblox_signup_validation"
-    if data.get("code") == 1:
-        return "claimed", "roblox_signup_validation"
-    return "unknown", "roblox_rejected_or_inconclusive"
+        return result(
+            username,
+            "unknown",
+            "roblox_invalid_response",
+        )
+
+    code = data.get("code")
+
+    if type(code) is int and code == 0:
+        return result(
+            username,
+            "available",
+            "roblox_signup_validation",
+        )
+
+    if type(code) is int and code == 1:
+        return result(
+            username,
+            "claimed",
+            "roblox_signup_validation",
+        )
+
+    return result(
+        username,
+        "unknown",
+        "roblox_rejected_or_inconclusive",
+    )
+
+
+# =====================================
+# MINECRAFT
+# =====================================
 
 def _check_minecraft(username):
-    url = "https://api.mojang.com/users/profiles/minecraft/" + quote(username, safe="")
-    data, error = _request_json("Minecraft", url)
+    url = (
+        "https://api.mojang.com"
+        "/users/profiles/minecraft/"
+        + quote(username, safe="")
+    )
+
+    data, error = _get_json(
+        "Minecraft",
+        url,
+    )
+
     if error == "not_found":
-        return "unknown", "no_existing_profile"
+        return result(
+            username,
+            "unknown",
+            "no_existing_profile",
+        )
+
     if error:
-        return "unknown", error
-    if isinstance(data, dict) and data.get("id") and str(data.get("name", "")).lower() == username.lower():
-        return "claimed", "existing_profile"
-    return "unknown", "inconclusive"
+        return result(
+            username,
+            "unknown",
+            error,
+        )
 
-def _pomelo_request_slot():
-    global _pomelo_next_request
-    with _pomelo_lock:
+    if (
+        isinstance(data, dict)
+        and isinstance(
+            data.get("id"), str
+        )
+        and bool(data["id"])
+        and str(
+            data.get("name", "")
+        ).lower() == username.lower()
+    ):
+        return result(
+            username,
+            "claimed",
+            "existing_profile",
+        )
+
+    return result(
+        username,
+        "unknown",
+        "minecraft_inconclusive",
+    )
+
+
+# =====================================
+# DISCORD INVALID STATUS DETECTION
+# =====================================
+
+_DISCORD_INVALID_CODES = {
+    "BASE_TYPE_BAD_LENGTH",
+    "USERNAME_INVALID_CHARACTERS",
+    "USERNAME_INVALID_REPEATING_DOTS",
+    "USERNAME_INVALID_CONTAINS",
+}
+
+
+def _discord_invalid_code(payload):
+    found = set()
+
+    def walk(node, depth=0):
+        if depth > 4:
+            return
+
+        if isinstance(node, dict):
+            code = node.get("code")
+
+            if (
+                isinstance(code, str)
+                and code in _DISCORD_INVALID_CODES
+            ):
+                found.add(code)
+
+            for key in (
+                "errors",
+                "username",
+                "_errors",
+            ):
+                if key in node:
+                    walk(
+                        node[key],
+                        depth + 1,
+                    )
+
+        elif isinstance(node, list):
+            for item in node[:8]:
+                walk(
+                    item,
+                    depth + 1,
+                )
+
+    walk(payload)
+
+    return (
+        sorted(found)[0]
+        if found
+        else None
+    )
+
+
+# =====================================
+# DISCORD RATE LIMITS
+# =====================================
+
+def _discord_slot():
+    global _discord_next
+
+    with _discord_lock:
         now = time.monotonic()
-        if now < _pomelo_cooldown_until or now < _pomelo_next_request:
-            return False
-        _pomelo_next_request = now + POMELO_INTERVAL
-        return True
 
-def _pomelo_set_cooldown(seconds):
-    global _pomelo_cooldown_until
-    with _pomelo_lock:
-        _pomelo_cooldown_until = max(_pomelo_cooldown_until, time.monotonic() + seconds)
+        if now < _discord_cooldown:
+            return (
+                False,
+                "discord_rate_limited",
+            )
 
-def _pomelo_unknown(username, reason):
-    return {"username": username, "status": "unknown", "reason": reason, "provider": "Pomelo", "source": None}
+        delay = max(
+            0.0,
+            _discord_next - now,
+        )
 
-def _pomelo_network_reason(error):
-    cause = error.reason if isinstance(error, URLError) else error
-    if isinstance(cause, ssl.SSLError):
-        return "pomelo_ssl_error"
-    if isinstance(cause, socket.gaierror):
-        return "pomelo_dns_error"
-    if isinstance(cause, (socket.timeout, TimeoutError)):
-        return "pomelo_timeout"
-    if isinstance(cause, ConnectionRefusedError) or (isinstance(cause, OSError) and cause.errno == 111):
-        return "pomelo_connection_refused"
-    return "pomelo_network_error"
+        _discord_next = (
+            max(now, _discord_next)
+            + DISCORD_MIN_INTERVAL
+        )
 
-# Diagnostic extraction: strictly allowlisted fields and characters.
-# Do not send raw provider response, URLs, credentials, or HTML to clients.
-_DIAGNOSTIC_KEYS = ("message", "error", "detail", "code", "field", "path", "type")
-_SECRET_PATTERN = re.compile(r"(?i)(bearer|token|secret|password|apikey|api.key|authorization|cookie|session|https?://|[A-Za-z0-9_-]{36,})")
+    if delay:
+        time.sleep(delay)
 
-def _collect_error_messages(value, depth=0):
-    if depth > 3:
-        return []
-    if isinstance(value, str):
-        return [value[:250]]
-    if isinstance(value, dict):
-        found = []
-        for key in _DIAGNOSTIC_KEYS:
-            if key in value:
-                found.extend(_collect_error_messages(value[key], depth + 1))
-        if "details" in value:
-            found.extend(_collect_error_messages(value["details"], depth + 1))
-        if "errors" in value:
-            found.extend(_collect_error_messages(value["errors"], depth + 1))
-        return found[:8]
-    if isinstance(value, list):
-        found = []
-        for item in value[:4]:
-            found.extend(_collect_error_messages(item, depth + 1))
-        return found[:8]
-    return []
+    with _discord_lock:
+        if time.monotonic() < _discord_cooldown:
+            return (
+                False,
+                "discord_rate_limited",
+            )
 
-def _safe_pomelo_error(error):
-    try:
-        raw = error.read(4096)
-        payload = json.loads(raw.decode("utf-8"))
-    except (OSError, ValueError, UnicodeError):
-        return "pomelo_http_" + str(error.code)
-    messages = _collect_error_messages(payload)
-    if not messages:
-        return "pomelo_http_" + str(error.code) + "_no_message"
-    # This is diagnostic text, not a claim about availability.
-    safe = []
-    for message in messages:
-        if _SECRET_PATTERN.search(message):
-            continue
-        if not re.fullmatch(r"[A-Za-z0-9 _.,:;!?()'\[\]/-]{1,160}", message):
-            continue
-        cleaned = re.sub(r"\s+", " ", message).strip()
-        if cleaned and cleaned not in safe:
-            safe.append(cleaned)
-    if not safe:
-        return "pomelo_http_" + str(error.code) + "_message_filtered"
-    # Existing frontend renders underscores as spaces.
-    # Prefix identifies source and HTTP code.
-    return "pomelo_http_" + str(error.code) + ": " + " | ".join(safe[:2])[:180]
+    return True, ""
 
-def test_pomelo_username(username):
-    username = str(username).strip().lower()
-    valid, reason = validate_username("Discord", username)
-    if not valid:
-        return {"username": username, "status": "invalid", "reason": reason, "provider": "local_validation", "source": None}
-    cached = _cache_get("Discord", username)
-    if cached:
-        return cached
-    if not _pomelo_request_slot():
-        return _pomelo_unknown(username, "pomelo_cooldown")
-    payload = {"username": username, "publicLookup": True, "useCache": True, "includeSuggestions": False, "includeUser": False}
-    request = Request(POMELO_URL, data=json.dumps(payload).encode("utf-8"), headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "winter.cc/6.8"}, method="POST")
-    try:
-        with urlopen(request, timeout=POMELO_TIMEOUT) as response:
-            data = json.load(response)
-    except HTTPError as error:
-        if error.code == 429:
-            _pomelo_set_cooldown(_retry_after_seconds(error.headers.get("Retry-After")))
-            return _pomelo_unknown(username, "pomelo_rate_limited")
-        if error.code in (401, 403):
-            return _pomelo_unknown(username, "pomelo_access_denied")
-        return _pomelo_unknown(username, _safe_pomelo_error(error))
-    except (URLError, TimeoutError, OSError) as error:
-        return _pomelo_unknown(username, _pomelo_network_reason(error))
-    except (ValueError, UnicodeError):
-        return _pomelo_unknown(username, "pomelo_invalid_response")
-    if not isinstance(data, dict):
-        return _pomelo_unknown(username, "pomelo_invalid_response")
-    details = data.get("data")
-    if not isinstance(details, dict):
-        return _pomelo_unknown(username, "pomelo_missing_data")
-    reported_status = str(details.get("status", "")).upper()
-    source = str(details.get("servedFrom", "UNKNOWN")).upper()
-    status = {"AVAILABLE": "available", "TAKEN": "claimed", "RESERVED": "claimed"}.get(reported_status, "unknown")
-    reason = "pomelo_reported_" + reported_status.lower() if status != "unknown" else ("pomelo_unrecognized_status" if reported_status else "pomelo_missing_status")
-    checked = {"username": username, "status": status, "reason": reason, "provider": "Pomelo", "provider_status": reported_status, "source": source, "duration": data.get("duration"), "cached": False}
-    _cache_set("Discord", username, checked)
-    return checked
+
+def _discord_block(seconds):
+    global _discord_cooldown
+
+    with _discord_lock:
+        _discord_cooldown = max(
+            _discord_cooldown,
+            time.monotonic() + seconds,
+        )
+
+
+# =====================================
+# DISCORD DIRECT CHECK
+# =====================================
 
 def _check_discord(username):
-    checked = test_pomelo_username(username)
-    return checked["status"], checked["reason"]
+    cached = _cache_get(
+        "Discord",
+        username,
+    )
+
+    if cached:
+        return cached
+
+    allowed, reason = _discord_slot()
+
+    if not allowed:
+        return result(
+            username,
+            "unknown",
+            reason,
+        )
+
+    request = Request(
+        DISCORD_URL,
+        data=json.dumps({
+            "username": username,
+        }).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "winter.cc/6.9",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=DISCORD_TIMEOUT,
+        ) as response:
+            data = json.load(response)
+
+    except HTTPError as error:
+        if error.code == 429:
+            seconds = _retry_after(
+                error.headers.get("Retry-After")
+            )
+
+            try:
+                response = json.loads(
+                    error.read(2048).decode("utf-8")
+                )
+
+                if isinstance(response, dict):
+                    seconds = max(
+                        seconds,
+                        _retry_after(
+                            response.get("retry_after")
+                        ),
+                    )
+
+            except (
+                ValueError,
+                UnicodeError,
+                OSError,
+            ):
+                pass
+
+            _discord_block(seconds)
+
+            return result(
+                username,
+                "unknown",
+                "discord_rate_limited",
+            )
+
+        if error.code in (401, 403):
+            _discord_block(180)
+
+            return result(
+                username,
+                "unknown",
+                "discord_access_blocked",
+            )
+
+        if error.code == 400:
+            try:
+                payload = json.loads(
+                    error.read(4096).decode("utf-8")
+                )
+
+            except (
+                ValueError,
+                UnicodeError,
+                OSError,
+            ):
+                payload = {}
+
+            invalid = _discord_invalid_code(
+                payload
+            )
+
+            if invalid:
+                checked = result(
+                    username,
+                    "invalid",
+                    "discord_" + invalid.lower(),
+                )
+
+                _cache_set(
+                    "Discord",
+                    username,
+                    checked,
+                )
+
+                return checked
+
+        return result(
+            username,
+            "unknown",
+            "discord_http_" + str(error.code),
+        )
+
+    except (
+        URLError,
+        TimeoutError,
+        OSError,
+    ) as error:
+        return result(
+            username,
+            "unknown",
+            _network_reason(
+                error,
+                "discord",
+            ),
+        )
+
+    except (
+        ValueError,
+        UnicodeError,
+    ):
+        return result(
+            username,
+            "unknown",
+            "discord_invalid_response",
+        )
+
+    # Strict interpretation:
+    # Only an actual JSON boolean is accepted.
+    if (
+        not isinstance(data, dict)
+        or type(data.get("taken")) is not bool
+    ):
+        return result(
+            username,
+            "unknown",
+            "discord_unexpected_response",
+        )
+
+    if data["taken"]:
+        checked = result(
+            username,
+            "claimed",
+            "discord_reported_taken",
+        )
+
+    else:
+        checked = result(
+            username,
+            "available",
+            "discord_reported_available",
+        )
+
+    checked["provider"] = "Discord"
+    checked["cached"] = False
+
+    _cache_set(
+        "Discord",
+        username,
+        checked,
+    )
+
+    return checked
+
+
+# =====================================
+# OWNER DASHBOARD POMELO TEST
+# =====================================
+
+def test_pomelo_username(username):
+    global _pomelo_next
+
+    username = str(
+        username
+    ).strip().lower()
+
+    valid, reason = validate_username(
+        "Discord",
+        username,
+    )
+
+    if not valid:
+        return {
+            "username": username,
+            "status": "invalid",
+            "reason": reason,
+            "provider": "local_validation",
+            "source": None,
+        }
+
+    with _pomelo_lock:
+        now = time.monotonic()
+
+        if now < _pomelo_next:
+            return {
+                "username": username,
+                "status": "unknown",
+                "reason": "pomelo_cooldown",
+                "provider": "Pomelo",
+                "source": None,
+            }
+
+        _pomelo_next = (
+            now + POMELO_MIN_INTERVAL
+        )
+
+    payload = {
+        "username": username,
+        "publicLookup": True,
+        "useCache": True,
+        "includeSuggestions": False,
+        "includeUser": False,
+    }
+
+    request = Request(
+        POMELO_URL,
+        data=json.dumps(
+            payload
+        ).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "winter.cc/6.9",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=POMELO_TIMEOUT,
+        ) as response:
+            data = json.load(response)
+
+    except HTTPError as error:
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": (
+                "pomelo_http_"
+                + str(error.code)
+            ),
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    except (
+        URLError,
+        TimeoutError,
+        OSError,
+    ) as error:
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": _network_reason(
+                error,
+                "pomelo",
+            ),
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    except (
+        ValueError,
+        UnicodeError,
+    ):
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": "pomelo_invalid_response",
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    details = (
+        data.get("data")
+        if isinstance(data, dict)
+        else None
+    )
+
+    if not isinstance(details, dict):
+        return {
+            "username": username,
+            "status": "unknown",
+            "reason": "pomelo_unexpected_response",
+            "provider": "Pomelo",
+            "source": None,
+        }
+
+    provider_status = str(
+        details.get("status", "")
+    ).upper()
+
+    status = {
+        "AVAILABLE": "available",
+        "TAKEN": "claimed",
+        "RESERVED": "claimed",
+    }.get(
+        provider_status,
+        "unknown",
+    )
+
+    if status != "unknown":
+        reason = (
+            "pomelo_reported_"
+            + provider_status.lower()
+        )
+    else:
+        reason = "pomelo_unexpected_status"
+
+    return {
+        "username": username,
+        "status": status,
+        "reason": reason,
+        "provider": "Pomelo",
+        "provider_status": provider_status,
+        "source": str(
+            details.get("servedFrom", "UNKNOWN")
+        ),
+        "duration": data.get("duration"),
+    }
+
+
+# =====================================
+# SINGLE USERNAME CHECK
+# =====================================
 
 def check_username(platform, username):
     if platform not in SUPPORTED_PLATFORMS:
-        raise ValueError("Unsupported platform")
+        raise ValueError(
+            "Unsupported platform"
+        )
+
     username = str(username).strip()
+
     if platform == "Discord":
         username = username.lower()
-    valid, validation_reason = validate_username(platform, username)
+
+    valid, reason = validate_username(
+        platform,
+        username,
+    )
+
     if not valid:
-        return result(username, "invalid", validation_reason)
-    cached = _cache_get(platform, username)
+        return result(
+            username,
+            "invalid",
+            reason,
+        )
+
+    cached = _cache_get(
+        platform,
+        username,
+    )
+
     if cached:
         return cached
+
     if platform == "Discord":
-        return test_pomelo_username(username)
+        return _check_discord(
+            username
+        )
+
     if platform == "Roblox":
-        status, reason = _check_roblox(username)
+        checked = _check_roblox(
+            username
+        )
+
     elif platform == "Minecraft":
-        status, reason = _check_minecraft(username)
+        checked = _check_minecraft(
+            username
+        )
+
     else:
-        status, reason = "unknown", "format_valid_but_availability_unverified"
-    checked = result(username, status, reason)
+        checked = result(
+            username,
+            "unknown",
+            "format_valid_but_availability_unverified",
+        )
+
     checked["cached"] = False
-    _cache_set(platform, username, checked)
+
+    _cache_set(
+        platform,
+        username,
+        checked,
+    )
+
     return checked
+
+
+# =====================================
+# BATCH CHECK
+# =====================================
 
 def check_batch(platform, usernames):
     if platform not in SUPPORTED_PLATFORMS:
-        raise ValueError("Unsupported platform")
-    unique = list(dict.fromkeys(str(name).strip() for name in usernames if str(name).strip()))
+        raise ValueError(
+            "Unsupported platform"
+        )
+
+    if not isinstance(
+        usernames,
+        (list, tuple),
+    ):
+        raise ValueError(
+            "Usernames must be a list"
+        )
+
+    unique = []
+    seen = set()
+
+    for value in usernames:
+        if not isinstance(value, str):
+            continue
+
+        username = value.strip()
+
+        if not username:
+            continue
+
+        key = username.lower()
+
+        if key not in seen:
+            unique.append(username)
+            seen.add(key)
+
     batch = unique[:MAX_BATCH_SIZE]
+
     if not batch:
-        return {"platform": platform, "results": [], "checked": 0, "total": 0, "remaining": 0}
+        return {
+            "platform": platform,
+            "results": [],
+            "checked": 0,
+            "total": 0,
+            "remaining": 0,
+        }
+
     if platform == "Discord":
         results = []
-        attempts = 0
+        uncached_count = 0
+
         for username in batch:
             normalized = username.lower()
-            valid, reason = validate_username(platform, normalized)
+
+            valid, validation_reason = (
+                validate_username(
+                    platform,
+                    normalized,
+                )
+            )
+
             if not valid:
-                results.append(result(username, "invalid", reason))
+                results.append(
+                    result(
+                        normalized,
+                        "invalid",
+                        validation_reason,
+                    )
+                )
                 continue
-            cached = _cache_get("Discord", normalized)
-            if cached:
-                results.append(cached)
+
+            existing = _cache_get(
+                platform,
+                normalized,
+            )
+
+            if existing:
+                results.append(existing)
                 continue
-            if attempts >= POMELO_MAX_PER_BATCH:
-                results.append(result(username, "unknown", "pomelo_batch_limit"))
+
+            if (
+                uncached_count
+                >= DISCORD_MAX_PER_BATCH
+            ):
+                results.append(
+                    result(
+                        normalized,
+                        "unknown",
+                        "discord_batch_limit",
+                    )
+                )
                 continue
-            results.append(check_username(platform, normalized))
-            attempts += 1
+
+            checked = check_username(
+                platform,
+                normalized,
+            )
+
+            results.append(checked)
+            uncached_count += 1
+
+            if checked.get("reason") in (
+                "discord_rate_limited",
+                "discord_access_blocked",
+            ):
+                for rest in batch[
+                    len(results):
+                ]:
+                    results.append(
+                        result(
+                            rest.lower(),
+                            "unknown",
+                            "discord_paused",
+                        )
+                    )
+
+                break
+
     elif platform in NETWORK_CHECKERS:
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(batch))) as executor:
-            results = list(executor.map(lambda username: check_username(platform, username), batch))
+        with ThreadPoolExecutor(
+            max_workers=min(
+                MAX_WORKERS,
+                len(batch),
+            )
+        ) as pool:
+            results = list(
+                pool.map(
+                    lambda name: check_username(
+                        platform,
+                        name,
+                    ),
+                    batch,
+                )
+            )
+
     else:
-        results = [check_username(platform, username) for username in batch]
-    return {"platform": platform, "results": results, "checked": len(results), "total": len(unique), "remaining": len(unique) - len(results)}
+        results = [
+            check_username(
+                platform,
+                name,
+            )
+            for name in batch
+        ]
+
+    return {
+        "platform": platform,
+        "results": results,
+        "checked": len(results),
+        "total": len(unique),
+        "remaining": (
+            len(unique) - len(results)
+        ),
+    }
+  
