@@ -1606,3 +1606,769 @@ start();
 
   render();
 })();
+
+
+/*
+ * winter.cc V5
+ * Reliable availability checks + premium RGB glow
+ * Compatible with existing V4 frontend and V5 backend.
+ */
+
+(function installWinterV5() {
+  if (window.winterV5Installed) return;
+  window.winterV5Installed = true;
+
+  const V5_BATCH_SIZE = 25;
+  const V5_RETRIES = 3;
+  const V5_RETRY_DELAY = 1200;
+
+  let currentRun = 0;
+  let retryQueue = [];
+  let completedNames = new Set();
+  let activeSearchId = null;
+  let activePlatform = null;
+
+  const sleep = ms =>
+    new Promise(resolve => setTimeout(resolve, ms));
+
+  const isTemporaryError = error => {
+    const message = String(
+      error && error.message || error
+    ).toLowerCase();
+
+    return (
+      message.includes('load failed') ||
+      message.includes('failed to fetch') ||
+      message.includes('network') ||
+      message.includes('unexpected response') ||
+      message.includes('timeout') ||
+      message.includes('temporarily unavailable')
+    );
+  };
+
+  async function requestWithRetry(
+    path,
+    body,
+    attempts = V5_RETRIES
+  ) {
+    let lastError;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await api(path, body);
+      } catch (error) {
+        lastError = error;
+
+        if (
+          !isTemporaryError(error) ||
+          attempt === attempts - 1
+        ) {
+          throw error;
+        }
+
+        const delay =
+          V5_RETRY_DELAY * Math.pow(2, attempt);
+
+        notice(
+          'Connection interrupted. Retrying ' +
+          (attempt + 1) + '/' +
+          (attempts - 1) + '...'
+        );
+
+        await sleep(delay);
+      }
+    }
+
+    throw lastError;
+  }
+
+  function installRGB() {
+    const oldStyle = document.getElementById(
+      'winter-rgb-style'
+    );
+
+    if (oldStyle) oldStyle.remove();
+
+    const existing = document.getElementById(
+      'winter-v5-rgb'
+    );
+
+    if (existing) return;
+
+    const style = document.createElement('style');
+    style.id = 'winter-v5-rgb';
+
+    style.textContent = `
+      @keyframes winterV5Rainbow {
+        0% {
+          background-position: 0% 50%;
+        }
+
+        100% {
+          background-position: 200% 50%;
+        }
+      }
+
+      @keyframes winterV5Glow {
+        0%, 100% {
+          filter:
+            drop-shadow(0 0 3px #ff3b8d)
+            drop-shadow(0 0 7px #9c40ff);
+        }
+
+        33% {
+          filter:
+            drop-shadow(0 0 4px #00eaff)
+            drop-shadow(0 0 9px #00ffa3);
+        }
+
+        66% {
+          filter:
+            drop-shadow(0 0 4px #ffdc00)
+            drop-shadow(0 0 9px #ff3b8d);
+        }
+      }
+
+      #resultList .winter-rgb-name,
+      #resultList .winter-v5-available {
+        display: inline-block !important;
+
+        background-image: linear-gradient(
+          90deg,
+          #ff245f 0%,
+          #ffb300 12.5%,
+          #f8ff00 25%,
+          #00ff80 37.5%,
+          #00dcff 50%,
+          #5865ff 62.5%,
+          #c44dff 75%,
+          #ff245f 87.5%,
+          #ffb300 100%
+        ) !important;
+
+        background-size: 200% 100% !important;
+        background-clip: text !important;
+        -webkit-background-clip: text !important;
+
+        color: transparent !important;
+        -webkit-text-fill-color: transparent !important;
+
+        font-weight: 900 !important;
+
+        animation:
+          winterV5Rainbow 2.4s linear infinite,
+          winterV5Glow 3s ease-in-out infinite
+          !important;
+
+        will-change: background-position, filter;
+      }
+
+      #resultList .winter-v5-available-row {
+        border-color: rgba(
+          177, 90, 255, 0.32
+        ) !important;
+      }
+
+      #resultList .winter-v5-available-row
+      .status {
+        color: #54ffab !important;
+        font-weight: 700 !important;
+        text-shadow: 0 0 8px
+          rgba(0, 255, 150, 0.45);
+      }
+
+      #winter-v5-progress {
+        margin: 12px 0;
+        padding: 12px;
+        border: 1px solid
+          rgba(160, 110, 255, 0.25);
+        border-radius: 12px;
+      }
+
+      #winter-v5-progress[hidden] {
+        display: none !important;
+      }
+
+      #winter-v5-progress-track {
+        height: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(
+          150, 150, 180, 0.2
+        );
+        margin-top: 9px;
+      }
+
+      #winter-v5-progress-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: inherit;
+        background: linear-gradient(
+          90deg,
+          #893aff,
+          #dc4cff,
+          #00dfff
+        );
+        transition: width 0.3s ease;
+      }
+
+      #winter-v5-resume {
+        margin-top: 10px;
+      }
+
+      @media (
+        prefers-reduced-motion: reduce
+      ) {
+        #resultList .winter-rgb-name,
+        #resultList .winter-v5-available {
+          animation: none !important;
+          filter: none !important;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function paintAvailableNames() {
+    const rows = document.querySelectorAll(
+      '#resultList .result'
+    );
+
+    for (const row of rows) {
+      const name = row.querySelector('code');
+
+      if (!name) continue;
+
+      const available =
+        statuses[name.textContent] ===
+        'available';
+
+      name.classList.toggle(
+        'winter-v5-available',
+        available
+      );
+
+      row.classList.toggle(
+        'winter-v5-available-row',
+        available
+      );
+    }
+  }
+
+  // The previous RGB addition already wraps render().
+  // This wrapper runs after it, preserving the original
+  // result rendering and all existing controls.
+  const previousRender = render;
+
+  render = function (...args) {
+    const value = previousRender.apply(
+      this,
+      args
+    );
+
+    paintAvailableNames();
+
+    return value;
+  };
+
+  function installProgressUI() {
+    if ($('winter-v5-progress')) return;
+
+    const box = document.createElement('div');
+    box.id = 'winter-v5-progress';
+    box.hidden = true;
+
+    const label = document.createElement('div');
+    label.id = 'winter-v5-progress-label';
+    label.textContent = 'Ready to check';
+
+    const track = document.createElement('div');
+    track.id = 'winter-v5-progress-track';
+
+    const fill = document.createElement('div');
+    fill.id = 'winter-v5-progress-fill';
+
+    track.append(fill);
+
+    const resume = document.createElement('button');
+    resume.id = 'winter-v5-resume';
+    resume.type = 'button';
+    resume.className = 'secondary';
+    resume.textContent = 'Resume unfinished checks';
+    resume.hidden = true;
+
+    box.append(label, track, resume);
+
+    const anchor = $('checkBtn');
+
+    anchor.parentNode.insertBefore(
+      box,
+      anchor.nextSibling
+    );
+
+    resume.onclick = async () => {
+      try {
+        await resumeChecks();
+      } catch (error) {
+        notice(
+          'Resume error: ' + error.message
+        );
+      }
+    };
+  }
+
+  function showProgress(
+    processed,
+    total,
+    label
+  ) {
+    const box = $('winter-v5-progress');
+
+    if (!box) return;
+
+    box.hidden = false;
+
+    const percent = total
+      ? Math.min(
+          100,
+          Math.round(
+            processed / total * 100
+          )
+        )
+      : 100;
+
+    $('winter-v5-progress-label')
+      .textContent =
+        label + ' · ' +
+        processed.toLocaleString() +
+        '/' +
+        total.toLocaleString() +
+        ' (' + percent + '%)';
+
+    $('winter-v5-progress-fill')
+      .style.width = percent + '%';
+
+    $('checkedStat').textContent =
+      processed.toLocaleString();
+  }
+
+  function setResumeVisible(visible) {
+    const button = $('winter-v5-resume');
+
+    if (button) {
+      button.hidden = !visible;
+      button.disabled = checkingInProgress;
+    }
+  }
+
+  function getRemaining() {
+    return retryQueue.filter(
+      name => !completedNames.has(name)
+    );
+  }
+
+  async function processChecks(
+    platform,
+    id,
+    pending
+  ) {
+    const runId = ++currentRun;
+    const total = pending.length;
+
+    let processed = 0;
+    let available = 0;
+    let claimed = 0;
+    let unknown = 0;
+    let interrupted = false;
+
+    checkingInProgress = true;
+    updateCheckButtons();
+    setResumeVisible(false);
+
+    try {
+      for (
+        let offset = 0;
+        offset < pending.length;
+        offset += V5_BATCH_SIZE
+      ) {
+        if (runId !== currentRun) {
+          interrupted = true;
+          break;
+        }
+
+        const batch = pending.slice(
+          offset,
+          offset + V5_BATCH_SIZE
+        ).filter(
+          name => !completedNames.has(name)
+        );
+
+        if (!batch.length) continue;
+
+        showProgress(
+          processed,
+          total,
+          'Checking ' + platform
+        );
+
+        let response;
+
+        try {
+          response = await requestWithRetry(
+            'check/auto',
+            {
+              platform,
+              search_id: id,
+              usernames: batch
+            }
+          );
+        } catch (error) {
+          interrupted = true;
+
+          notice(
+            'Connection interrupted: ' +
+            error.message +
+            '. Your progress is preserved. ' +
+            'Tap Resume to continue.'
+          );
+
+          break;
+        }
+
+        const returned = new Map(
+          (response.results || []).map(
+            item => [item.username, item]
+          )
+        );
+
+        for (const username of batch) {
+          const item = returned.get(username);
+
+          if (!item) {
+            interrupted = true;
+            continue;
+          }
+
+          const status = [
+            'available',
+            'claimed',
+            'unknown'
+          ].includes(item.status)
+            ? item.status
+            : 'unknown';
+
+          statuses[username] = status;
+
+          // An Unknown result is still a completed
+          // attempt, but NOT confirmed availability.
+          completedNames.add(username);
+
+          processed++;
+
+          if (status === 'available') {
+            available++;
+          } else if (status === 'claimed') {
+            claimed++;
+          } else {
+            unknown++;
+          }
+        }
+
+        render();
+
+        showProgress(
+          processed,
+          total,
+          'Checking ' + platform
+        );
+
+        // If a batch was only partially returned,
+        // preserve missing names for resumption.
+        if (
+          returned.size < batch.length
+        ) {
+          interrupted = true;
+          break;
+        }
+      }
+
+      try {
+        await loadHistory();
+      } catch (error) {
+        console.warn(
+          'History refresh failed:',
+          error
+        );
+      }
+
+      const remaining = getRemaining();
+
+      setResumeVisible(
+        interrupted && remaining.length > 0
+      );
+
+      if (remaining.length > 0) {
+        notice(
+          'Check paused. ' +
+          remaining.length +
+          ' usernames remain. ' +
+          'Tap Resume unfinished checks.'
+        );
+      } else {
+        notice(
+          'Checking finished. ' +
+          'Available: ' + available +
+          ' · Taken: ' + claimed +
+          ' · Unknown: ' + unknown +
+          '. Unknown does not mean available.'
+        );
+      }
+
+    } finally {
+      checkingInProgress = false;
+      updateCheckButtons();
+
+      const button = $('winter-v5-resume');
+
+      if (button) {
+        button.disabled = false;
+      }
+
+      render();
+    }
+  }
+
+  async function beginChecks() {
+    if (checkingInProgress) return;
+
+    if (!names.length) {
+      throw Error(
+        'Generate usernames first'
+      );
+    }
+
+    const platform = $('platform').value;
+
+    // If an unfinished search already exists,
+    // resume it instead of creating duplicates.
+    if (
+      activeSearchId &&
+      activePlatform === platform &&
+      getRemaining().length > 0
+    ) {
+      await resumeChecks();
+      return;
+    }
+
+    checkingInProgress = true;
+    updateCheckButtons();
+
+    let data;
+
+    try {
+      notice(
+        'Saving usernames for checking...'
+      );
+
+      data = await requestWithRetry(
+        'check',
+        {
+          platform,
+          usernames: [...names]
+        }
+      );
+    } finally {
+      checkingInProgress = false;
+      updateCheckButtons();
+    }
+
+    searchId = data.search_id;
+    activeSearchId = searchId;
+    activePlatform = platform;
+
+    statuses = Object.fromEntries(
+      data.results.map(
+        row => [
+          row.username,
+          row.status
+        ]
+      )
+    );
+
+    completedNames = new Set();
+
+    retryQueue = data.results
+      .filter(
+        row => row.status === 'unknown'
+      )
+      .map(
+        row => row.username
+      );
+
+    render();
+
+    if (
+      platform !== 'Roblox' &&
+      platform !== 'Minecraft'
+    ) {
+      notice(
+        platform +
+        ' does not have an integrated ' +
+        'supported availability checker. ' +
+        'Results remain Unknown.'
+      );
+
+      showProgress(
+        0,
+        retryQueue.length,
+        'Verification unavailable'
+      );
+
+      setResumeVisible(false);
+
+      return;
+    }
+
+    await processChecks(
+      platform,
+      activeSearchId,
+      retryQueue
+    );
+  }
+
+  async function resumeChecks() {
+    if (checkingInProgress) return;
+
+    if (!activeSearchId) {
+      throw Error(
+        'No unfinished search to resume'
+      );
+    }
+
+    if (
+      $('platform').value !== activePlatform
+    ) {
+      throw Error(
+        'Switch back to ' +
+        activePlatform +
+        ' to resume this search'
+      );
+    }
+
+    const remaining = getRemaining();
+
+    if (!remaining.length) {
+      notice(
+        'All submitted usernames have ' +
+        'already been processed.'
+      );
+      setResumeVisible(false);
+      return;
+    }
+
+    await processChecks(
+      activePlatform,
+      activeSearchId,
+      remaining
+    );
+  }
+
+  // Replace the original button handlers.
+  $('checkBtn').onclick = async () => {
+    if (
+      checkingInProgress ||
+      generatingInProgress
+    ) return;
+
+    try {
+      await beginChecks();
+    } catch (error) {
+      notice(
+        'Checking error: ' +
+        error.message
+      );
+    }
+  };
+
+  // Preserve the existing Generate button handler.
+  // Auto Check is temporarily disabled during the
+  // original handler so that V5 can take over.
+  const originalGenerate =
+    $('generateBtn').onclick;
+
+  $('generateBtn').onclick = async () => {
+    if (
+      generatingInProgress ||
+      checkingInProgress
+    ) return;
+
+    const toggle = $('autoCheck');
+    const autoEnabled = Boolean(
+      toggle && toggle.checked
+    );
+
+    if (toggle) toggle.checked = false;
+
+    try {
+      await originalGenerate();
+
+      if (!names.length) return;
+
+      activeSearchId = null;
+      activePlatform = null;
+      retryQueue = [];
+      completedNames = new Set();
+      setResumeVisible(false);
+
+      const progress = $('winter-v5-progress');
+
+      if (progress) progress.hidden = true;
+
+      if (autoEnabled) {
+        await beginChecks();
+      }
+
+    } catch (error) {
+      notice(
+        'Error: ' + error.message
+      );
+    } finally {
+      if (toggle) {
+        toggle.checked = autoEnabled;
+      }
+    }
+  };
+
+  // A platform change invalidates unfinished
+  // checks for the previously selected platform.
+  const originalPlatformChange =
+    $('platform').onchange;
+
+  $('platform').onchange = function (...args) {
+    currentRun++;
+    activeSearchId = null;
+    activePlatform = null;
+    retryQueue = [];
+    completedNames = new Set();
+
+    setResumeVisible(false);
+
+    const progress = $('winter-v5-progress');
+
+    if (progress) progress.hidden = true;
+
+    if (originalPlatformChange) {
+      return originalPlatformChange.apply(
+        this,
+        args
+      );
+    }
+  };
+
+  installRGB();
+  installProgressUI();
+  render();
+})();
+
+
