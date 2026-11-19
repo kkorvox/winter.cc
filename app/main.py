@@ -1,13 +1,17 @@
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import (
+    FastAPI, HTTPException, Header, Depends,
+    Request, Response
+)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from psycopg.errors import UniqueViolation
+from psycopg.errors import UniqueViolation, ForeignKeyViolation
 
 from .core import (
     init, setup_owner, db, auth, current_user,
@@ -27,11 +31,21 @@ app = FastAPI(
 
 ROOT = Path(__file__).resolve().parent.parent
 
+COOKIE_NAME = "winter_session"
+REMEMBER_SECONDS = 30 * 24 * 60 * 60
+COOKIE_OPTIONS = {
+    "httponly": True,
+    "secure": True,
+    "samesite": "lax",
+    "path": "/api"
+}
+
 
 class Login(BaseModel):
     username: str
     password: str
     license_key: str
+    remember: bool = False
 
 
 class Generate(BaseModel):
@@ -77,11 +91,36 @@ class AdminLicense(BaseModel):
     expires_at: str | None = None
 
 
-def require(authorization: str | None = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
+def get_token(request: Request, authorization: str | None):
+    if authorization and authorization.startswith("Bearer "):
+        return authorization[7:], False
+
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        return cookie, True
+
+    return None, False
+
+
+def require(
+    request: Request,
+    authorization: str | None = Header(None)
+):
+    token, from_cookie = get_token(request, authorization)
+
+    if not token:
         raise HTTPException(401, "Login required")
 
-    user = current_user(authorization[7:])
+    if from_cookie and request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        expected = str(request.base_url).rstrip("/")
+
+        if origin != expected:
+            raise HTTPException(
+                403, "Invalid request origin"
+            )
+
+    user = current_user(token)
 
     if not user:
         raise HTTPException(
@@ -94,11 +133,12 @@ def require(authorization: str | None = Header(None)):
 def require_admin(user=Depends(require)):
     if not user["is_admin"]:
         raise HTTPException(403, "Owner access required")
+
     return user
 
 
 @app.post("/api/login")
-def login(body: Login):
+def login(body: Login, response: Response):
     token = auth(
         body.username,
         body.password,
@@ -110,7 +150,42 @@ def login(body: Login):
             401, "Invalid credentials or license"
         )
 
-    return {"token": token}
+    if body.remember:
+        with db() as conn:
+            conn.execute(
+                """UPDATE sessions
+                   SET expires=%s
+                   WHERE token_hash=%s""",
+                (
+                    time.time() + REMEMBER_SECONDS,
+                    hash_key(token)
+                )
+            )
+
+        response.set_cookie(
+            key=COOKIE_NAME,
+            value=token,
+            max_age=REMEMBER_SECONDS,
+            **COOKIE_OPTIONS
+        )
+
+        return {
+            "ok": True,
+            "remembered": True
+        }
+
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/api",
+        secure=True,
+        httponly=True,
+        samesite="lax"
+    )
+
+    return {
+        "token": token,
+        "remembered": False
+    }
 
 
 @app.get("/api/me")
@@ -120,14 +195,33 @@ def me(user=Depends(require)):
 
 @app.post("/api/logout")
 def logout(
-    authorization: str | None = Header(None),
-    user=Depends(require)
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(None)
 ):
-    with db() as conn:
-        conn.execute(
-            "DELETE FROM sessions WHERE token_hash=%s",
-            (hash_key(authorization[7:]),)
-        )
+    token, from_cookie = get_token(request, authorization)
+
+    if from_cookie:
+        origin = request.headers.get("origin")
+        expected = str(request.base_url).rstrip("/")
+
+        if origin != expected:
+            raise HTTPException(403, "Invalid request origin")
+
+    if token:
+        with db() as conn:
+            conn.execute(
+                "DELETE FROM sessions WHERE token_hash=%s",
+                (hash_key(token),)
+            )
+
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/api",
+        secure=True,
+        httponly=True,
+        samesite="lax"
+    )
 
     return {"ok": True}
 
@@ -192,9 +286,7 @@ def check(body: Check, user=Depends(require)):
 
 @app.post("/api/mark")
 def mark(body: Mark, user=Depends(require)):
-    if body.status not in (
-        "available", "claimed", "unknown"
-    ):
+    if body.status not in ("available", "claimed", "unknown"):
         raise HTTPException(400, "Invalid status")
 
     with db() as conn:
@@ -384,15 +476,10 @@ def admin_create_user(
     username = body.username.strip()
 
     if not username:
-        raise HTTPException(
-            400, "Username is required"
-        )
+        raise HTTPException(400, "Username is required")
 
     try:
-        user_id = create_user(
-            username,
-            body.password
-        )
+        user_id = create_user(username, body.password)
 
     except UniqueViolation:
         raise HTTPException(
@@ -400,9 +487,7 @@ def admin_create_user(
         )
 
     except ValueError as error:
-        raise HTTPException(
-            400, str(error)
-        )
+        raise HTTPException(400, str(error))
 
     return {
         "id": user_id,
@@ -418,8 +503,7 @@ def admin_delete_user(
 ):
     if user_id == user["id"]:
         raise HTTPException(
-            403,
-            "You cannot delete your own owner account"
+            403, "You cannot delete your own owner account"
         )
 
     with db() as conn:
@@ -432,9 +516,7 @@ def admin_delete_user(
         ).fetchone()
 
         if not target:
-            raise HTTPException(
-                404, "User not found"
-            )
+            raise HTTPException(404, "User not found")
 
         if target["is_admin"]:
             raise HTTPException(
@@ -443,9 +525,6 @@ def admin_delete_user(
 
         username = target["username"]
 
-        # Foreign-key cascades remove the user's
-        # licenses, sessions, searches, results,
-        # favorites, presets and check state.
         conn.execute(
             "DELETE FROM users WHERE id=%s",
             (user_id,)
@@ -505,8 +584,7 @@ def admin_create_license(
 
         except ValueError:
             raise HTTPException(
-                400,
-                "Enter a valid future expiration date"
+                400, "Enter a valid future expiration date"
             )
 
     with db() as conn:
@@ -516,19 +594,13 @@ def admin_create_license(
         ).fetchone()
 
         if not target:
-            raise HTTPException(
-                404, "User not found"
-            )
+            raise HTTPException(404, "User not found")
 
     try:
-        key = create_license(
-            user_id,
-            expires
-        )
-    except Exception:
-        # Do not expose database details to members.
+        key = create_license(user_id, expires)
+    except ForeignKeyViolation:
         raise HTTPException(
-            500, "Unable to generate license"
+            404, "User no longer exists"
         )
 
     return {
@@ -554,9 +626,7 @@ def admin_revoke_license(
         ).fetchone()
 
         if not row:
-            raise HTTPException(
-                404, "License not found"
-            )
+            raise HTTPException(404, "License not found")
 
         if (
             row["user_id"] == user["id"]
@@ -618,9 +688,7 @@ def admin_reactivate_license(
         ).fetchone()
 
         if not row:
-            raise HTTPException(
-                404, "License not found"
-            )
+            raise HTTPException(404, "License not found")
 
         conn.execute(
             """UPDATE licenses
