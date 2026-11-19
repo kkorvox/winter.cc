@@ -771,19 +771,21 @@ def start_search(user_id, platform, names):
             for name in names
         ]
 
-        conn.executemany(
-            """INSERT INTO results
-               (search_id,username,status)
-               VALUES(%s,%s,%s)""",
-            [
-                (
-                    search_id,
-                    row["username"],
-                    row["status"]
+        if rows:
+            with conn.cursor() as cursor:
+                cursor.executemany(
+                    """INSERT INTO results
+                       (search_id,username,status)
+                       VALUES(%s,%s,%s)""",
+                    [
+                        (
+                            search_id,
+                            item["username"],
+                            item["status"]
+                        )
+                        for item in rows
+                    ]
                 )
-                for row in rows
-            ]
-        )
 
         conn.execute(
             """INSERT INTO check_state
