@@ -2,6 +2,9 @@
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
@@ -18,8 +21,13 @@ SUPPORTED_PLATFORMS = (
 CACHE_SECONDS = 300
 MIN_REQUEST_INTERVAL = 1.5
 MAX_BATCH_SIZE = 25
+MAX_WORKERS = 4
+REQUEST_TIMEOUT = 6
+MAX_RETRIES = 2
 
-_lock = threading.Lock()
+_cache_lock = threading.Lock()
+_schedule_lock = threading.Lock()
+
 _cache = {}
 _next_request = {}
 _cooldown = {}
@@ -33,75 +41,122 @@ def result(username, status="unknown", reason=""):
     }
 
 
+def _retry_after_seconds(value):
+    if not value:
+        return 60.0
+
+    try:
+        return max(5.0, min(float(value), 300.0))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        date = parsedate_to_datetime(value)
+
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+
+        seconds = (
+            date - datetime.now(timezone.utc)
+        ).total_seconds()
+
+        return max(5.0, min(seconds, 300.0))
+
+    except (TypeError, ValueError, OverflowError):
+        return 60.0
+
+
+def _wait_for_request_slot(platform):
+    while True:
+        with _schedule_lock:
+            current = time.monotonic()
+
+            cooldown_until = _cooldown.get(
+                platform, 0
+            )
+
+            if current < cooldown_until:
+                return False
+
+            next_allowed = _next_request.get(
+                platform, 0
+            )
+
+            if current >= next_allowed:
+                _next_request[platform] = (
+                    current + MIN_REQUEST_INTERVAL
+                )
+                return True
+
+            wait = next_allowed - current
+
+        time.sleep(min(wait, 0.25))
+
+
 def _request_json(platform, url):
-    with _lock:
-        current = time.monotonic()
-
-        if current < _cooldown.get(platform, 0):
+    for attempt in range(MAX_RETRIES + 1):
+        if not _wait_for_request_slot(platform):
             return None, "rate_limited"
-
-        wait = max(
-            0,
-            _next_request.get(platform, 0) - current
-        )
-
-        if wait:
-            time.sleep(wait)
-
-        _next_request[platform] = (
-            time.monotonic() + MIN_REQUEST_INTERVAL
-        )
 
         request = Request(
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "winter.cc/4.0"
+                "User-Agent": "winter.cc/5.0"
             }
         )
 
         try:
-            with urlopen(request, timeout=8) as response:
+            with urlopen(
+                request,
+                timeout=REQUEST_TIMEOUT
+            ) as response:
                 return json.load(response), None
 
         except HTTPError as error:
             if error.code == 429:
-                retry_after = error.headers.get(
-                    "Retry-After", "60"
+                delay = _retry_after_seconds(
+                    error.headers.get("Retry-After")
                 )
 
-                try:
-                    delay = max(
-                        5,
-                        min(float(retry_after), 300)
+                with _schedule_lock:
+                    _cooldown[platform] = max(
+                        _cooldown.get(platform, 0),
+                        time.monotonic() + delay
                     )
-                except ValueError:
-                    delay = 60
-
-                _cooldown[platform] = (
-                    time.monotonic() + delay
-                )
 
                 return None, "rate_limited"
 
             if error.code == 404:
                 return None, "not_found"
 
+            if error.code in (500, 502, 503, 504):
+                if attempt < MAX_RETRIES:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+
+                return None, "http_error"
+
             return None, "http_error"
 
         except (
             URLError,
             TimeoutError,
-            ValueError,
             OSError
         ):
+            if attempt < MAX_RETRIES:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+
             return None, "network_error"
+
+        except (ValueError, UnicodeError):
+            return None, "invalid_response"
+
+    return None, "network_error"
 
 
 def _check_roblox(username):
-    # Roblox signup username validation.
-    # Code 0 means valid for signup at check time.
-    # Other codes are not automatically "taken".
     params = urlencode({
         "request.username": username,
         "request.birthday": "2000-01-01T00:00:00Z",
@@ -114,7 +169,9 @@ def _check_roblox(username):
         + params
     )
 
-    data, error = _request_json("Roblox", url)
+    data, error = _request_json(
+        "Roblox", url
+    )
 
     if error:
         return "unknown", error
@@ -127,7 +184,6 @@ def _check_roblox(username):
     if code == 0:
         return "available", "roblox_validation"
 
-    # Roblox code 1 indicates username already in use.
     if code == 1:
         return "claimed", "roblox_validation"
 
@@ -135,11 +191,10 @@ def _check_roblox(username):
 
 
 def _check_minecraft(username):
-    # Minecraft profile lookup identifies existing names.
-    # A 404 does NOT prove a name is available.
     url = (
         "https://api.mojang.com/users/profiles/"
-        "minecraft/" + quote(username, safe="")
+        "minecraft/" +
+        quote(username, safe="")
     )
 
     data, error = _request_json(
@@ -155,7 +210,7 @@ def _check_minecraft(username):
     if (
         isinstance(data, dict)
         and data.get("id")
-        and data.get("name", "").lower()
+        and str(data.get("name", "")).lower()
         == username.lower()
     ):
         return "claimed", "existing_profile"
@@ -171,13 +226,15 @@ def check_username(platform, username):
 
     if not username:
         return result(
-            username, "unknown", "empty_username"
+            username,
+            "unknown",
+            "empty_username"
         )
 
     key = (platform, username.lower())
     current = time.monotonic()
 
-    with _lock:
+    with _cache_lock:
         cached = _cache.get(key)
 
         if cached and cached[1] > current:
@@ -195,18 +252,25 @@ def check_username(platform, username):
         status = "unknown"
         reason = "no_supported_availability_api"
 
-    checked = result(username, status, reason)
+    checked = result(
+        username,
+        status,
+        reason
+    )
+
     checked["cached"] = False
 
-    if reason not in (
+    temporary_errors = {
         "rate_limited",
         "network_error",
         "http_error",
-        "invalid_response"
-    ):
-        with _lock:
+        "invalid_response",
+    }
+
+    if reason not in temporary_errors:
+        with _cache_lock:
             _cache[key] = (
-                checked,
+                dict(checked),
                 time.monotonic() + CACHE_SECONDS
             )
 
@@ -223,22 +287,45 @@ def check_batch(platform, usernames):
         if str(name).strip()
     ))
 
-    checked = []
+    batch = unique[:MAX_BATCH_SIZE]
 
-    for username in unique[:MAX_BATCH_SIZE]:
-        item = check_username(
-            platform, username
-        )
+    if not batch:
+        return {
+            "platform": platform,
+            "results": [],
+            "checked": 0,
+            "total": 0,
+            "remaining": 0,
+        }
 
-        checked.append(item)
+    # Unsupported platforms do not need network requests.
+    if platform not in ("Roblox", "Minecraft"):
+        results = [
+            result(
+                username,
+                "unknown",
+                "no_supported_availability_api"
+            )
+            for username in batch
+        ]
 
-        if item["reason"] == "rate_limited":
-            break
+    else:
+        with ThreadPoolExecutor(
+            max_workers=min(MAX_WORKERS, len(batch))
+        ) as executor:
+            results = list(
+                executor.map(
+                    lambda username: check_username(
+                        platform, username
+                    ),
+                    batch
+                )
+            )
 
     return {
         "platform": platform,
-        "results": checked,
-        "checked": len(checked),
+        "results": results,
+        "checked": len(results),
         "total": len(unique),
-        "remaining": len(unique) - len(checked),
+        "remaining": len(unique) - len(results),
     }
