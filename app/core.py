@@ -201,6 +201,17 @@ def current_user(token):
         return dict(row) if row else None
 
 
+
+
+
+def pronounceable(rng, size):
+    return ''.join(rng.choice(CONSONANTS if i%2==0 else VOWELS)
+                   for i in range(size))
+
+
+def random_base(rng, pool, size):
+    return ''.join(rng.choices(pool,k=size))
+    
 def valid_platform_name(platform, name):
     if platform not in RULES or not isinstance(name, str):
         return False
@@ -219,16 +230,6 @@ def valid_platform_name(platform, name):
     if platform == 'Telegram':
         return name[0].isalpha()
     return True
-
-
-def pronounceable(rng, size):
-    return ''.join(rng.choice(CONSONANTS if i%2==0 else VOWELS)
-                   for i in range(size))
-
-
-def random_base(rng, pool, size):
-    return ''.join(rng.choices(pool,k=size))
-
 
 def fit_word(rng, words, size, pool):
     exact = [w for w in words if len(w)==size]
