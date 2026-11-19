@@ -1,6 +1,47 @@
-/* winter.cc Frontend V7.6 - No auto cooldown, public profile checks.
+/* winter.cc Frontend V7.7 - Visible notice + per-username results progress.
    Full replacement, preserving Owner Dashboard, login, favorites, presets and exports.
    Backend pacing and Discord rate-limit responses are always respected. */
+
+const UNKNOWN_NOTICE_TEXT = 'any usernames under unknown may be available.';
+const PROGRESS_STEP_DELAY_MS = 45;
+
+// Shows on every web or desktop app launch; never changes check results.
+function installUnknownNotice() {
+  if (document.getElementById('winter-startup-note')) return;
+  const noticeBox = document.createElement('aside');
+  noticeBox.id = 'winter-startup-note';
+  noticeBox.setAttribute('role', 'status');
+  noticeBox.setAttribute('aria-label', 'Username availability notice');
+  Object.assign(noticeBox.style, {
+    position: 'fixed', zIndex: '99999',
+    top: '12px', left: '50%',
+    transform: 'translateX(-50%)',
+    boxSizing: 'border-box',
+    width: 'calc(100% - 24px)', maxWidth: '560px',
+    padding: '14px 16px', borderRadius: '14px',
+    border: '1px solid #8059b8',
+    background: '#21152f', color: '#f1ddff',
+    boxShadow: '0 10px 32px rgba(0,0,0,.48)',
+    display: 'flex', alignItems: 'center', gap: '12px'
+  });
+  const message = document.createElement('span');
+  message.textContent = '❄️ ' + UNKNOWN_NOTICE_TEXT;
+  message.style.flex = '1';
+  message.style.fontSize = '14px';
+  message.style.lineHeight = '1.5';
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.textContent = 'Got it';
+  dismiss.setAttribute('aria-label', 'Dismiss notice');
+  Object.assign(dismiss.style, {
+    flex: '0 0 auto', padding: '8px 12px', borderRadius: '9px',
+    border: '1px solid #9b72ce', background: '#6733a1',
+    color: '#fff', cursor: 'pointer', fontWeight: '600'
+  });
+  dismiss.onclick = () => noticeBox.remove();
+  noticeBox.append(message, dismiss);
+  document.body.append(noticeBox);
+}
 
 const $ = id => document.getElementById(id);
 let token = sessionStorage.getItem('winter_token') || '';
@@ -598,7 +639,6 @@ async function runChecks() {
   checkingInProgress = true;
   updateCheckButtons();
   resume.hidden = true;
-  let processed = checkRun.done.length;
   let pausedReason = '';
 
   try {
@@ -611,7 +651,7 @@ async function runChecks() {
         : ['Instagram', 'TikTok', 'Telegram'].includes(checkRun.platform)
           ? SOCIAL_BATCH_SIZE : DEFAULT_BATCH_SIZE;
       const batch = checkRun.pending.slice(0, batchSize);
-      progress(processed, total, 'Checking ' + checkRun.platform);
+      progress(checkRun.done.length, total, 'Checking ' + checkRun.platform);
 
       let response;
       try {
@@ -632,8 +672,11 @@ async function runChecks() {
           .map(item => [item.username.toLowerCase(), item])
       );
 
-      const completed = new Set();
+      let completedCount = 0;
+      // The server may finish a group of lookups together. We apply and
+      // display each returned result separately; no extra API calls occur.
       for (const name of batch) {
+        if (version !== generationVersion || !checkRun) return;
         const item = returned.get(name.toLowerCase());
         if (!item) {
           pausedReason = 'Server response was incomplete';
@@ -647,40 +690,41 @@ async function runChecks() {
         checkReasons[name] = reason;
 
         if (PAUSE_REASONS.has(reason)) {
-          // Provider rejected this check: keep the name Pending for manual retry.
+          // A rejected lookup is still Pending for manual retry.
           pausedReason = friendlyReason(reason);
+          render();
           continue;
         }
 
         if (['available','claimed'].includes(status) && reason !== 'already_recorded') {
           sources[name] = 'automatic';
         }
-        completed.add(name);
-      }
+        if (!checkRun.done.includes(name)) checkRun.done.push(name);
+        checkRun.pending = checkRun.pending.filter(n => n !== name);
+        completedCount++;
 
-      // Save successful outcomes even if another name in the batch was limited.
-      for (const name of batch) {
-        if (completed.has(name) && !checkRun.done.includes(name)) {
-          checkRun.done.push(name);
+        // Genuine processed-result count: one change per returned name.
+        saveCurrentResults();
+        render();
+        progress(checkRun.done.length, total, 'Checking ' + checkRun.platform);
+        // Yield for one paint so a 10-name group does not visually jump by 10.
+        if (batch.length > 1 && !document.hidden) {
+          await sleep(PROGRESS_STEP_DELAY_MS);
         }
       }
-      checkRun.pending = checkRun.pending.filter(n => !completed.has(n));
-      processed = checkRun.done.length;
 
       saveCurrentResults();
       render();
-      progress(processed, checkRun.done.length + checkRun.pending.length,
+      progress(checkRun.done.length,
+        checkRun.done.length + checkRun.pending.length,
         'Checking ' + checkRun.platform);
 
       if (pausedReason) break;
-      if (!completed.size) {
+      if (!completedCount) {
         pausedReason = 'No completed results';
         break;
       }
-
-      if (discord && checkRun.pending.length) {
-        await sleep(DISCORD_DELAY_MS);
-      }
+      if (discord && checkRun.pending.length) await sleep(DISCORD_DELAY_MS);
     }
 
     if (version !== generationVersion) return;
@@ -710,6 +754,7 @@ async function runChecks() {
     render();
   }
 }
+
 async function beginChecks() {
   if (checkingInProgress || generatingInProgress) return;
   if (!names.length) throw Error('Generate usernames first');
@@ -854,4 +899,31 @@ document.addEventListener('keydown',e=>{
     e.preventDefault();$('generateBtn').click();
   }
 });
+// Existing HTML has a Windows download button. Always point it at the
+// newest signed-off release instead of an obsolete v1.0.0 build.
+function refreshDesktopDownloadLinks() {
+  const downloadUrl =
+    'https://github.com/kkorvox/winter.cc/releases/latest/download/wintercc.exe';
+  const detailsUrl =
+    'https://github.com/kkorvox/winter.cc/releases/latest';
+  document.querySelectorAll('a[href*="/releases/download/v1.0.0/wintercc.exe"]').forEach(a => {
+    a.href = downloadUrl;
+  });
+  document.querySelectorAll('a[href*="/releases/tag/v1.0.0"]').forEach(a => {
+    a.href = detailsUrl;
+  });
+  const downloads = document.getElementById('downloads');
+  if (downloads) {
+    const eyebrow = downloads.querySelector('.eyebrow');
+    if (eyebrow) eyebrow.textContent = 'DESKTOP APPLICATION / V7.7';
+    for (const paragraph of downloads.querySelectorAll('p.muted')) {
+      if (paragraph.textContent.trim().startsWith('Version 1.0.0')) {
+        paragraph.textContent = 'Version 7.7 · Windows 10/11 · Internet required';
+      }
+    }
+  }
+}
+
+refreshDesktopDownloadLinks();
+installUnknownNotice();
 start();
