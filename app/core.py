@@ -201,8 +201,6 @@ def setup_owner():
         )
 
     with db() as conn:
-        # Prevent simultaneous startup workers from
-        # attempting to create the owner at the same time.
         conn.execute(
             "SELECT pg_advisory_xact_lock(847211)"
         )
