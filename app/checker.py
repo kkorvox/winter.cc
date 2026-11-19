@@ -1,5 +1,6 @@
 
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,11 @@ SUPPORTED_PLATFORMS = (
     "Instagram",
     "TikTok",
     "Telegram",
+    "Minecraft",
+)
+
+NETWORK_CHECKERS = (
+    "Roblox",
     "Minecraft",
 )
 
@@ -41,12 +47,102 @@ def result(username, status="unknown", reason=""):
     }
 
 
+def validate_username(platform, username):
+    """
+    Conservative local validation.
+
+    True: passes the rules checked here.
+    False: violates a known formatting rule.
+
+    Passing does not prove that a username is
+    accepted or available for registration.
+    """
+
+    if platform not in SUPPORTED_PLATFORMS:
+        return False, "unsupported_platform"
+
+    if not username:
+        return False, "empty_username"
+
+    if platform == "Discord":
+        valid = (
+            2 <= len(username) <= 32
+            and bool(re.fullmatch(
+                r"[a-z0-9._]+",
+                username
+            ))
+            and ".." not in username
+        )
+
+    elif platform == "Roblox":
+        valid = (
+            3 <= len(username) <= 20
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9_]+",
+                username
+            ))
+            and not username.startswith("_")
+            and not username.endswith("_")
+            and username.count("_") <= 1
+        )
+
+    elif platform == "Instagram":
+        valid = (
+            1 <= len(username) <= 30
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9._]+",
+                username
+            ))
+            and not username.endswith(".")
+        )
+
+    elif platform == "TikTok":
+        valid = (
+            2 <= len(username) <= 24
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9._]+",
+                username
+            ))
+            and not username.endswith(".")
+        )
+
+    elif platform == "Telegram":
+        valid = (
+            5 <= len(username) <= 32
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9_]+",
+                username
+            ))
+            and username[0].isalpha()
+        )
+
+    elif platform == "Minecraft":
+        valid = (
+            3 <= len(username) <= 16
+            and bool(re.fullmatch(
+                r"[A-Za-z0-9_]+",
+                username
+            ))
+        )
+
+    else:
+        valid = False
+
+    if not valid:
+        return False, "invalid_format"
+
+    return True, "format_valid"
+
+
 def _retry_after_seconds(value):
     if not value:
         return 60.0
 
     try:
-        return max(5.0, min(float(value), 300.0))
+        return max(
+            5.0,
+            min(float(value), 300.0)
+        )
     except (TypeError, ValueError):
         pass
 
@@ -54,13 +150,15 @@ def _retry_after_seconds(value):
         date = parsedate_to_datetime(value)
 
         if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
+            date = date.replace(
+                tzinfo=timezone.utc
+            )
 
-        seconds = (
+        delay = (
             date - datetime.now(timezone.utc)
         ).total_seconds()
 
-        return max(5.0, min(seconds, 300.0))
+        return max(5.0, min(delay, 300.0))
 
     except (TypeError, ValueError, OverflowError):
         return 60.0
@@ -71,11 +169,9 @@ def _wait_for_request_slot(platform):
         with _schedule_lock:
             current = time.monotonic()
 
-            cooldown_until = _cooldown.get(
+            if current < _cooldown.get(
                 platform, 0
-            )
-
-            if current < cooldown_until:
+            ):
                 return False
 
             next_allowed = _next_request.get(
@@ -102,7 +198,7 @@ def _request_json(platform, url):
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "winter.cc/5.0"
+                "User-Agent": "winter.cc/5.1"
             }
         )
 
@@ -130,12 +226,14 @@ def _request_json(platform, url):
             if error.code == 404:
                 return None, "not_found"
 
-            if error.code in (500, 502, 503, 504):
+            if error.code in (
+                500, 502, 503, 504
+            ):
                 if attempt < MAX_RETRIES:
-                    time.sleep(0.5 * (attempt + 1))
+                    time.sleep(
+                        0.5 * (attempt + 1)
+                    )
                     continue
-
-                return None, "http_error"
 
             return None, "http_error"
 
@@ -145,7 +243,9 @@ def _request_json(platform, url):
             OSError
         ):
             if attempt < MAX_RETRIES:
-                time.sleep(0.5 * (attempt + 1))
+                time.sleep(
+                    0.5 * (attempt + 1)
+                )
                 continue
 
             return None, "network_error"
@@ -159,7 +259,8 @@ def _request_json(platform, url):
 def _check_roblox(username):
     params = urlencode({
         "request.username": username,
-        "request.birthday": "2000-01-01T00:00:00Z",
+        "request.birthday":
+            "2000-01-01T00:00:00Z",
         "request.context": "Signup",
     })
 
@@ -182,19 +283,28 @@ def _check_roblox(username):
     code = data.get("code")
 
     if code == 0:
-        return "available", "roblox_validation"
+        return (
+            "available",
+            "roblox_signup_validation"
+        )
 
     if code == 1:
-        return "claimed", "roblox_validation"
+        return (
+            "claimed",
+            "roblox_signup_validation"
+        )
 
-    return "unknown", "roblox_rejected_or_invalid"
+    return (
+        "unknown",
+        "roblox_rejected_or_inconclusive"
+    )
 
 
 def _check_minecraft(username):
     url = (
         "https://api.mojang.com/users/profiles/"
-        "minecraft/" +
-        quote(username, safe="")
+        "minecraft/"
+        + quote(username, safe="")
     )
 
     data, error = _request_json(
@@ -202,7 +312,10 @@ def _check_minecraft(username):
     )
 
     if error == "not_found":
-        return "unknown", "no_existing_profile"
+        return (
+            "unknown",
+            "no_existing_profile"
+        )
 
     if error:
         return "unknown", error
@@ -210,8 +323,9 @@ def _check_minecraft(username):
     if (
         isinstance(data, dict)
         and data.get("id")
-        and str(data.get("name", "")).lower()
-        == username.lower()
+        and str(
+            data.get("name", "")
+        ).lower() == username.lower()
     ):
         return "claimed", "existing_profile"
 
@@ -224,11 +338,15 @@ def check_username(platform, username):
 
     username = str(username).strip()
 
-    if not username:
+    valid, validation_reason = (
+        validate_username(platform, username)
+    )
+
+    if not valid:
         return result(
             username,
-            "unknown",
-            "empty_username"
+            "invalid",
+            validation_reason
         )
 
     key = (platform, username.lower())
@@ -243,14 +361,20 @@ def check_username(platform, username):
             return saved
 
     if platform == "Roblox":
-        status, reason = _check_roblox(username)
+        status, reason = _check_roblox(
+            username
+        )
 
     elif platform == "Minecraft":
-        status, reason = _check_minecraft(username)
+        status, reason = _check_minecraft(
+            username
+        )
 
     else:
         status = "unknown"
-        reason = "no_supported_availability_api"
+        reason = (
+            "format_valid_but_availability_unverified"
+        )
 
     checked = result(
         username,
@@ -298,25 +422,26 @@ def check_batch(platform, usernames):
             "remaining": 0,
         }
 
-    # Unsupported platforms do not need network requests.
-    if platform not in ("Roblox", "Minecraft"):
+    if platform not in NETWORK_CHECKERS:
         results = [
-            result(
-                username,
-                "unknown",
-                "no_supported_availability_api"
+            check_username(
+                platform, username
             )
             for username in batch
         ]
 
     else:
         with ThreadPoolExecutor(
-            max_workers=min(MAX_WORKERS, len(batch))
+            max_workers=min(
+                MAX_WORKERS,
+                len(batch)
+            )
         ) as executor:
             results = list(
                 executor.map(
                     lambda username: check_username(
-                        platform, username
+                        platform,
+                        username
                     ),
                     batch
                 )
@@ -327,5 +452,7 @@ def check_batch(platform, usernames):
         "results": results,
         "checked": len(results),
         "total": len(unique),
-        "remaining": len(unique) - len(results),
+        "remaining": (
+            len(unique) - len(results)
+        ),
     }
