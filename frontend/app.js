@@ -1516,3 +1516,93 @@ document.addEventListener('keydown', e => {
 
 // Restore an existing login or remembered cookie.
 start();
+
+
+/* winter.cc — Animated RGB Available Usernames */
+
+(function installRainbowAvailable() {
+  if (document.getElementById('winter-rgb-style')) {
+    return;
+  }
+
+  const style = document.createElement('style');
+  style.id = 'winter-rgb-style';
+
+  style.textContent = `
+    @keyframes winterRainbowMove {
+      0% {
+        background-position: 0% 50%;
+      }
+
+      50% {
+        background-position: 100% 50%;
+      }
+
+      100% {
+        background-position: 0% 50%;
+      }
+    }
+
+    #resultList .winter-rgb-name {
+      background-image: linear-gradient(
+        90deg,
+        #ff003c,
+        #ff8c00,
+        #ffff00,
+        #00ff66,
+        #00d9ff,
+        #5555ff,
+        #bd00ff,
+        #ff003c
+      ) !important;
+
+      background-size: 400% 100% !important;
+      background-clip: text !important;
+      -webkit-background-clip: text !important;
+
+      color: transparent !important;
+      -webkit-text-fill-color: transparent !important;
+
+      animation: winterRainbowMove 3s linear infinite !important;
+
+      font-weight: 800 !important;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #resultList .winter-rgb-name {
+        animation: none !important;
+      }
+    }
+  `;
+
+  document.head.appendChild(style);
+
+  const originalRender = render;
+
+  render = function (...args) {
+    const result = originalRender.apply(this, args);
+
+    const rows = document.querySelectorAll(
+      '#resultList .result'
+    );
+
+    for (const row of rows) {
+      const name = row.querySelector('code');
+      const status = row.querySelector('.status');
+
+      if (!name || !status) continue;
+
+      const isAvailable =
+        statuses[name.textContent] === 'available';
+
+      name.classList.toggle(
+        'winter-rgb-name',
+        isAvailable
+      );
+    }
+
+    return result;
+  };
+
+  render();
+})();
