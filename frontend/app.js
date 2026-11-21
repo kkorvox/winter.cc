@@ -1,4 +1,4 @@
-/* winter.cc Frontend V7.10 - Automatic resume after Discord provider cooldowns.
+/* winter.cc Frontend V7.11 - PostgreSQL-backed Discord queue.
    Full replacement, preserving Owner Dashboard, login, favorites, presets and exports.
    Backend pacing and Discord rate-limit responses are always respected. */
 
@@ -25,7 +25,7 @@ function installUnknownNotice() {
     display: 'flex', alignItems: 'center', gap: '12px'
   });
   const message = document.createElement('span');
-  message.textContent = '❄️ ' + UNKNOWN_NOTICE_TEXT;
+  message.textContent = 'â„ï¸ ' + UNKNOWN_NOTICE_TEXT;
   message.style.flex = '1';
   message.style.fontSize = '14px';
   message.style.lineHeight = '1.5';
@@ -295,9 +295,9 @@ function render() {
     if(statuses[n]==='available') {
       name.classList.add('winter-rgb-name');row.classList.add('winter-available-row');
     }
-    const fav=document.createElement('button');fav.className='tiny';fav.textContent='☆';fav.title='Favorite';
+    const fav=document.createElement('button');fav.className='tiny';fav.textContent='â˜†';fav.title='Favorite';
     fav.onclick=async()=>{try{await api('favorites',{platform:$('platform').value,username:n});await loadFavorites();}catch(e){notice(e.message);}};
-    const open=document.createElement('a');open.textContent='↗';open.title='Open platform/profile';
+    const open=document.createElement('a');open.textContent='â†—';open.title='Open platform/profile';
     open.href=link($('platform').value,n);open.target='_blank';open.rel='noopener noreferrer';
     row.append(name,status,fav,open);
     if(searchId && statuses[n]!=='skipped') {
@@ -323,7 +323,7 @@ function render() {
       const detail=document.createElement('small');
       detail.className='winter-reason muted';
       detail.textContent=friendlyReason(checkReasons[n]) +
-        (sources[n]==='automatic' ? ' · Automatic check' : '');
+        (sources[n]==='automatic' ? ' Â· Automatic check' : '');
       detail.title=checkReasons[n];
       row.append(detail);
     }
@@ -345,7 +345,7 @@ async function loadFavorites() {
   const box=$('favoriteList');box.replaceChildren();
   for(const x of favorites) {
     const row=document.createElement('div');row.className='result';
-    const label=document.createElement('span');label.textContent=x.username+' · '+x.platform;
+    const label=document.createElement('span');label.textContent=x.username+' Â· '+x.platform;
     const button=document.createElement('button');button.className='tiny';button.textContent='Remove';
     button.onclick=async()=>{
       try{await api('favorites/'+encodeURIComponent(x.platform)+'/'+encodeURIComponent(x.username),{},'DELETE');await loadFavorites();}
@@ -358,7 +358,7 @@ async function loadHistory() {
   const history=await api('history');const box=$('historyList');box.replaceChildren();
   for(const s of history) {
     const row=document.createElement('div');row.className='result';
-    row.textContent='#'+s.id+' · '+s.platform+' · '+String(s.created||'').slice(0,19).replace('T',' ')+' · '+s.results.length+' shown';
+    row.textContent='#'+s.id+' Â· '+s.platform+' Â· '+String(s.created||'').slice(0,19).replace('T',' ')+' Â· '+s.results.length+' shown';
     box.append(row);
   }
 }
@@ -397,7 +397,7 @@ function licenseStatus(license) {
 function licenseRow(license) {
   const row=document.createElement('div');row.className='result';
   const info=document.createElement('span');
-  info.textContent='#'+license.id+' · '+(license.username||'Member')+' · Expires: '+formatDate(license.expires_at);
+  info.textContent='#'+license.id+' Â· '+(license.username||'Member')+' Â· Expires: '+formatDate(license.expires_at);
   const status=licenseStatus(license);const badge=document.createElement('strong');
   badge.className='license-status '+(status==='Active'?'status-active':status==='Revoked'?'status-revoked':'status-expired');
   badge.textContent=status;row.append(info,badge);
@@ -429,8 +429,8 @@ function renderAdminUsers() {
   for(const user of users) {
     const row=document.createElement('div');row.className='result';
     const info=document.createElement('span');
-    info.textContent='#'+user.id+' · '+user.username+(user.is_admin?' · Owner':' · Member')+
-      (user.suspended?' · Suspended':'')+' · Logins: '+(user.login_count||0);
+    info.textContent='#'+user.id+' Â· '+user.username+(user.is_admin?' Â· Owner':' Â· Member')+
+      (user.suspended?' Â· Suspended':'')+' Â· Logins: '+(user.login_count||0);
     row.append(info,makeButton('Details','tiny secondary',async()=>showMemberDetails(user.id)));
     if(!user.is_admin) {
       row.append(makeButton(user.suspended?'Unsuspend':'Suspend',user.suspended?'tiny success-button':'tiny danger-button',async()=>{
@@ -462,9 +462,9 @@ async function showMemberDetails(userId) {
   $('adminMemberDetails').hidden=false;$('adminMemberTitle').textContent='Member: '+data.member.username;
   const member=data.member;$('adminMemberInfo').replaceChildren();
   const info=document.createElement('p');info.className='muted';
-  info.textContent='Account ID: '+member.id+' · Created: '+formatDate(member.created_at)+
-    ' · Last login: '+formatDate(member.last_login)+' · Total logins: '+member.login_count+
-    ' · Status: '+(member.suspended?'Suspended':'Enabled');
+  info.textContent='Account ID: '+member.id+' Â· Created: '+formatDate(member.created_at)+
+    ' Â· Last login: '+formatDate(member.last_login)+' Â· Total logins: '+member.login_count+
+    ' Â· Status: '+(member.suspended?'Suspended':'Enabled');
   $('adminMemberInfo').append(info);
   const licensesBox=$('adminMemberLicenses');licensesBox.replaceChildren();
   if(!data.licenses.length)licensesBox.append(makeEmpty('No licenses for this member.'));
@@ -473,7 +473,7 @@ async function showMemberDetails(userId) {
   if(!data.activity.length)activityBox.append(makeEmpty('No activity recorded yet.'));
   else for(const event of data.activity) {
     const row=document.createElement('div');row.className='result';
-    row.textContent=formatDate(event.created)+' · '+event.action+(event.details?' · '+event.details:'');
+    row.textContent=formatDate(event.created)+' Â· '+event.action+(event.details?' Â· '+event.details:'');
     activityBox.append(row);
   }
   $('adminMemberDetails').scrollIntoView({behavior:'smooth',block:'start'});
@@ -494,8 +494,8 @@ async function loadAdminActivity() {
   for(const event of events) {
     const row=document.createElement('div');row.className='result';
     const info=document.createElement('span');
-    info.textContent=formatDate(event.created)+' · '+event.username+' · '+event.action+
-      (event.details?' · '+event.details:'');row.append(info);box.append(row);
+    info.textContent=formatDate(event.created)+' Â· '+event.username+' Â· '+event.action+
+      (event.details?' Â· '+event.details:'');row.append(info);box.append(row);
   }
 }
 async function loadAdmin() {
@@ -581,7 +581,7 @@ function installProgress() {
 function progress(processed,total,label) {
   const box=$('winter-v6-progress');box.hidden=false;
   const percent=total?Math.round(processed/total*100):100;
-  $('winter-v6-label').textContent=label+' · '+processed.toLocaleString()+'/'+total.toLocaleString()+' ('+percent+'%)';
+  $('winter-v6-label').textContent=label+' Â· '+processed.toLocaleString()+'/'+total.toLocaleString()+' ('+percent+'%)';
   $('winter-v6-fill').style.width=percent+'%';
   $('checkedStat').textContent=processed.toLocaleString();
 }
@@ -598,12 +598,71 @@ function cooldownText(seconds) {
 function updateResumeCooldown() {
   const button = $('winter-v6-resume');
   if (!button) return;
+  if (checkRun?.serverQueue) { button.hidden = true; return; }
   const seconds = retrySecondsRemaining();
   button.disabled = checkingInProgress || generatingInProgress || seconds > 0;
   button.textContent = seconds
-    ? 'Waiting for Discord · auto-resume in ' + cooldownText(seconds)
+    ? 'Waiting for Discord Â· auto-resume in ' + cooldownText(seconds)
     : 'Resume unfinished checks';
 }
+// The server owns Discord work; it survives browser refreshes and Render restarts.
+// A status of Unknown is never interpreted as an available username.
+let discordQueuePolling = false;
+async function refreshBackendDiscordQueue() {
+  if (discordQueuePolling || !checkRun?.serverQueue || $('app').hidden) return;
+  const expectedId = checkRun.id;
+  discordQueuePolling = true;
+  try {
+    const snapshot = await api('discord-queue/' + expectedId);
+    if (!checkRun || checkRun.id !== expectedId || !checkRun.serverQueue) return;
+    const items = new Map((snapshot.results || []).map(item => [item.username.toLowerCase(), item]));
+    const pending = [], finished = [];
+    for (const name of names) {
+      const item = items.get(name.toLowerCase());
+      if (!item) continue;
+      const state = item.queue_state;
+      const status = ['available','claimed','invalid','unknown','skipped'].includes(item.status)
+        ? item.status : 'unknown';
+      statuses[name] = status;
+      checkReasons[name] = item.reason || (status === 'skipped' ? 'previously_available' : 'queued');
+      if ((status === 'available' || status === 'claimed') && state === 'done') {
+        sources[name] = 'automatic';
+      }
+      if (state === 'done' || state === 'unresolved') finished.push(name);
+      else pending.push(name);
+    }
+    checkRun.pending = pending;
+    checkRun.done = finished;
+    checkRun.retryAt = snapshot.retry_after > 0
+      ? Date.now() + snapshot.retry_after * 1000 : 0;
+    saveCheckRun();
+    progress(finished.length, names.length, 'Discord queue');
+    $('winter-v6-resume').hidden = true;
+    render();
+    const tally = counts();
+    notice(pending.length
+      ? 'Discord queue is running on the server: ' + finished.length + '/' + names.length +
+        ' processed, ' + pending.length + ' queued.' +
+        (snapshot.retry_after > 0 ? ' Next permitted attempt in about ' + cooldownText(snapshot.retry_after) + '.' : '')
+      : 'Queue finished. Available: ' + tally.available +
+        ' Â· Taken: ' + tally.claimed +
+        ' Â· Invalid: ' + tally.invalid +
+        ' Â· Unknown/unverified: ' + tally.unknown +
+        '. Unknown does NOT mean available.');
+    if (!pending.length) {
+      checkRun = null;
+      saveCheckRun();
+    }
+  } catch (error) {
+    notice('Queue status temporarily unavailable: ' + error.message + '. Will check again.');
+  } finally {
+    discordQueuePolling = false;
+  }
+}
+setInterval(() => {
+  if (checkRun?.serverQueue) refreshBackendDiscordQueue();
+}, 5000);
+
 function updateCheckButtons() {
   $('checkBtn').disabled=checkingInProgress||generatingInProgress;
   $('generateBtn').disabled=checkingInProgress||generatingInProgress;
@@ -616,6 +675,7 @@ function updateCheckButtons() {
 let automaticDiscordResumeStarting = false;
 function tryAutomaticDiscordResume() {
   updateResumeCooldown();
+  if (checkRun?.serverQueue) return;
   if (automaticDiscordResumeStarting || checkingInProgress || generatingInProgress ||
       !checkRun || checkRun.platform !== 'Discord' || !checkRun.pending?.length ||
       !Number(checkRun.retryAt) || retrySecondsRemaining() > 0 || $('app').hidden) {
@@ -644,13 +704,18 @@ async function requestWithRetry(path,body) {
 function saveCheckRun() {
   try {
     if (checkRun) {
-      sessionStorage.setItem('winter_check_run', JSON.stringify({
+      const snapshot = JSON.stringify({
         ...checkRun,
+        account: $('who')?.textContent || '',
         statuses: {...statuses},
         reasons: {...checkReasons},
         sources: {...sources}
-      }));
+      });
+      sessionStorage.setItem('winter_check_run', snapshot);
+      if (checkRun.serverQueue) localStorage.setItem('winter_check_run', snapshot);
+      else localStorage.removeItem('winter_check_run');
     } else {
+      localStorage.removeItem('winter_check_run');
       sessionStorage.removeItem('winter_check_run');
     }
   } catch (error) {
@@ -671,6 +736,7 @@ async function runChecks() {
   if (checkingInProgress || generatingInProgress) return;
   if (!checkRun) throw Error('No search to resume');
   if (checkRun.platform !== $('platform').value) throw Error('Platform changed');
+  if (checkRun.serverQueue) { await refreshBackendDiscordQueue(); return; }
   const cooldown = retrySecondsRemaining();
   if (cooldown) {
     notice('Waiting for Discord. ' + checkRun.pending.length +
@@ -801,10 +867,10 @@ async function runChecks() {
       : 'Check finished. ';
     notice(intro +
       'Available: ' + tally.available +
-      ' · Taken: ' + tally.claimed +
-      ' · Invalid: ' + tally.invalid +
-      ' · Unknown: ' + tally.unknown +
-      ' · Pending: ' + tally.pending +
+      ' Â· Taken: ' + tally.claimed +
+      ' Â· Invalid: ' + tally.invalid +
+      ' Â· Unknown: ' + tally.unknown +
+      ' Â· Pending: ' + tally.pending +
       '. Use the Results tabs to filter.');
 
     resume.hidden = !remaining;
@@ -859,6 +925,20 @@ async function beginChecks() {
   saveCheckRun();
   render();
 
+  if (checkRun.platform === 'Discord') {
+    // New queue start is idempotent; a retry will not duplicate work.
+    try {
+      await api('discord-queue/start', {search_id: searchId});
+      checkRun.serverQueue = true;
+      saveCheckRun();
+      await refreshBackendDiscordQueue();
+    } catch (error) {
+      notice('Could not start the server queue: ' + error.message +
+        '. Make sure app/discord_queue.py is installed and connected to main.py.');
+    }
+    return;
+  }
+
   if (!checkRun.pending.length) {
     progress(0, 0, 'No usernames to check');
     notice('No unprocessed usernames.');
@@ -881,8 +961,11 @@ async function start() {
     checkboxes('characters',chars,['Lowercase','Numbers']);
     installAutoCheckToggle();installProgress();installStyles();installResultTabs();showApp();
     try {
-      const saved=JSON.parse(sessionStorage.getItem('winter_check_run')||'null');
-      if(saved&&platforms[saved.platform]&&Array.isArray(saved.pending)&&Array.isArray(saved.done)){
+      const saved=JSON.parse(localStorage.getItem('winter_check_run') || sessionStorage.getItem('winter_check_run') || 'null');
+      if (saved?.account && saved.account !== me.username) {
+        localStorage.removeItem('winter_check_run');
+        sessionStorage.removeItem('winter_check_run');
+      } else if(saved&&platforms[saved.platform]&&Array.isArray(saved.pending)&&Array.isArray(saved.done)){
         $('platform').value=saved.platform;updateLengths(['3','4','5']);
         checkRun=saved;searchId=saved.id;
         names=[...saved.done,...saved.pending];statuses={...Object.fromEntries(names.map(n=>[n,'unknown'])),...(saved.statuses||saved.snapshot||{})};sources={...(saved.sources||{})};checkReasons={...(saved.reasons||{})};
@@ -890,6 +973,7 @@ async function start() {
         updateResumeCooldown();
         progress(saved.done.length,names.length,'Paused '+saved.platform);
         render();
+        if (checkRun.serverQueue) refreshBackendDiscordQueue();
       }
     }catch(e){console.warn('Saved check could not be restored',e);}
     await Promise.all([loadFavorites(),loadHistory(),loadPresets(),...(isAdmin?[loadAdmin()]:[])]);
@@ -969,12 +1053,12 @@ document.addEventListener('keydown',e=>{
 // The release must actually exist and pass developer security review first.
 function refreshDesktopDownloadLinks() {
   const downloadUrl =
-    'https://github.com/kkorvox/winter.cc/releases/download/v7.8/wintercc.exe';
+    'https://github.com/kkorvox/winter.cc/releases/download/v7.8/winter.cc.usergen.exe';
   const detailsUrl =
     'https://github.com/kkorvox/winter.cc/releases/tag/v7.8';
   const downloads = document.getElementById('downloads');
   if (!downloads) return;
-  downloads.querySelectorAll('a[href*="wintercc.exe"]').forEach(a => {
+  downloads.querySelectorAll('a[href*="/releases/download/"]').forEach(a => {
     a.href = downloadUrl;
   });
   downloads.querySelectorAll('a[href*="/releases/tag/"], a[href*="/releases/latest"]').forEach(a => {
@@ -984,7 +1068,7 @@ function refreshDesktopDownloadLinks() {
   if (eyebrow) eyebrow.textContent = 'DESKTOP APPLICATION / V7.8';
   for (const paragraph of downloads.querySelectorAll('p.muted')) {
     if (/^Version (?:1\.0\.0|7\.7|7\.8)/.test(paragraph.textContent.trim())) {
-      paragraph.textContent = 'Version 7.8 · Windows 10/11 · Internet required';
+      paragraph.textContent = 'Version 7.8 Â· Windows 10/11 Â· Internet required';
     }
   }
 }
