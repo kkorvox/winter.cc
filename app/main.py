@@ -626,3 +626,9 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=ROOT / "frontend"), name="static")
+
+
+# Discord queue V7.11: durable background checks via existing PostgreSQL.
+# Keep all legacy checkers and routes unchanged.
+from .discord_queue import attach as attach_discord_queue
+attach_discord_queue(app, require)
